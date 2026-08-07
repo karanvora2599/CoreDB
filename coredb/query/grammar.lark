@@ -1,0 +1,31 @@
+// Temporal graph query DSL grammar. Patterns are (subject, predicate, object)
+// triples where any position can be a literal or a `?var` wildcard.
+// MATCH (SUBJECT, ?p, ?o) AS OF '2026-03-05' [KNOWN BY '2026-03-06T00:00:00']
+// HISTORY (SUBJECT, PREDICATE, ?o) [BETWEEN 'd1' AND 'd2']
+// DIFF BETWEEN 'd1' AND 'd2' [FOR (SUBJECT, ?p, ?o)]
+// RANGE (SUBJECT, PREDICATE, ?o) BETWEEN 'd1' AND 'd2'
+// SERIES (SUBJECT, PREDICATE, ?o) BETWEEN 'd1' AND 'd2' [RESOLUTION '7d']
+
+start: statement
+
+statement: match_stmt
+         | history_stmt
+         | diff_stmt
+         | range_stmt
+         | series_stmt
+
+match_stmt: "MATCH"i pattern "AS"i "OF"i STRING ("KNOWN"i "BY"i STRING)?
+history_stmt: "HISTORY"i pattern ("BETWEEN"i STRING "AND"i STRING)?
+diff_stmt: "DIFF"i "BETWEEN"i STRING "AND"i STRING ("FOR"i pattern)?
+range_stmt: "RANGE"i pattern "BETWEEN"i STRING "AND"i STRING
+series_stmt: "SERIES"i pattern "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i STRING)?
+
+pattern: "(" term "," term "," term ")"
+term: VAR | IDENTIFIER
+
+VAR: "?" IDENTIFIER
+IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
+STRING: /'[^']*'/
+
+%import common.WS
+%ignore WS

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coredb"
+version = "0.1.0"
+description = "Embedded bitemporal graph database with a custom temporal query DSL"
+requires-python = ">=3.10"
+dependencies = [
+    "lmdb>=1.4.1",
+    "lark>=1.1.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["coredb*"]
+
+[tool.setuptools.package-data]
+coredb = ["query/grammar.lark"]
