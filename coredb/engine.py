@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timezone
 
+from .errors import SchemaVersionError, ValidationError
 from .model import Assertion, Entity, RelationshipVersion
 from .series import GraphDelta, GraphSeries
 from .storage import keys as K
@@ -25,6 +26,9 @@ from .storage.kvstore import KVStore
 
 _VERSIONS_LOW = b"\x00" * 8
 _VERSIONS_HIGH = b"\xff" * 8 + b"\x00"
+
+SCHEMA_VERSION = 1
+_SCHEMA_VERSION_KEY = b"__schema_version__"
 
 
 def _utcnow_iso() -> str:
@@ -35,12 +39,43 @@ def _parse_date(d: str) -> date:
     return datetime.strptime(d, "%Y-%m-%d").date()
 
 
+def _validate_identifier(name: str, value) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f"{name} must be a non-empty string, got {value!r}")
+    if "\x00" in value:
+        raise ValidationError(f"{name} must not contain a NUL byte, got {value!r}")
+
+
+def _validate_date(name: str, value) -> None:
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be a 'YYYY-MM-DD' string, got {value!r}")
+    try:
+        _parse_date(value)
+    except ValueError as e:
+        raise ValidationError(f"{name} is not a valid 'YYYY-MM-DD' date: {value!r}") from e
+
+
 class Database:
     def __init__(self, store: KVStore):
         self._store = store
+        self._check_schema_version()
 
     def close(self) -> None:
         self._store.close()
+
+    def _check_schema_version(self) -> None:
+        with self._store.txn(write=True) as t:
+            raw = t.get("counters", _SCHEMA_VERSION_KEY)
+            if raw is None:
+                t.put("counters", _SCHEMA_VERSION_KEY, str(SCHEMA_VERSION).encode())
+            else:
+                on_disk = int(raw.decode())
+                if on_disk != SCHEMA_VERSION:
+                    raise SchemaVersionError(
+                        f"database schema_version={on_disk} does not match this code's "
+                        f"SCHEMA_VERSION={SCHEMA_VERSION}. Use Database.dump() with the "
+                        "matching old version and coredb.restore() with this one to migrate."
+                    )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -178,6 +213,10 @@ class Database:
         """Open a new interval for (subject, predicate, object_id), or - if
         one is already open - confirm it as of valid_from instead of
         creating a duplicate. Returns the version_id."""
+        _validate_identifier("subject", subject)
+        _validate_identifier("predicate", predicate)
+        _validate_identifier("object_id", object_id)
+        _validate_date("valid_from", valid_from)
         now_iso = _utcnow_iso()
         with self._store.txn(write=True) as t:
             rel_id = self._find_or_create_relationship(t, subject, predicate, object_id, now_iso)
@@ -205,6 +244,10 @@ class Database:
     def retract_fact(self, subject: str, predicate: str, object_id: str, valid_to: str) -> int | None:
         """Explicitly close the open interval for (subject, predicate, object_id)
         at valid_to. Returns the version_id closed, or None if nothing was open."""
+        _validate_identifier("subject", subject)
+        _validate_identifier("predicate", predicate)
+        _validate_identifier("object_id", object_id)
+        _validate_date("valid_to", valid_to)
         now_iso = _utcnow_iso()
         with self._store.txn(write=True) as t:
             key = K.triple_key(subject, predicate, object_id)
@@ -217,6 +260,11 @@ class Database:
                 return None
             vid = K.decode_id(existing)
             version = self._load_version(t, vid)
+            if valid_to < version.valid_from:
+                raise ValidationError(
+                    f"valid_to ({valid_to!r}) precedes valid_from ({version.valid_from!r}) "
+                    f"for ({subject!r}, {predicate!r}, {object_id!r})"
+                )
             version.valid_to = valid_to
             version.system_to = now_iso
             self._store_version(t, version)
@@ -233,6 +281,11 @@ class Database:
         last_confirmed date, so ingestion gaps don't fabricate false
         closures). `sources`, if given, maps object_id -> list of source
         dicts/urls, each producing an Assertion for this date."""
+        _validate_identifier("subject", subject)
+        _validate_identifier("predicate", predicate)
+        _validate_date("as_of_date", as_of_date)
+        for obj in objects_now_true:
+            _validate_identifier("object_id", obj)
         sources = sources or {}
         now_iso = _utcnow_iso()
         opened, closed, confirmed = [], [], []
@@ -243,7 +296,10 @@ class Database:
                 if obj in currently_open:
                     rel_id, vid = currently_open[obj]
                     version = self._load_version(t, vid)
-                    version.last_confirmed = as_of_date
+                    # max(), not a direct assignment: an out-of-chronological-order
+                    # as_of_date must never move last_confirmed backwards below
+                    # valid_from, or a later close would produce an inverted interval.
+                    version.last_confirmed = max(version.last_confirmed, as_of_date)
                     if confidence is not None:
                         version.confidence = confidence
                     new_ids = self._create_assertions(t, rel_id, vid, sources.get(obj), as_of_date, now_iso, confidence)
@@ -401,6 +457,44 @@ class Database:
         with self._store.txn() as t:
             raw = t.get("entities", entity_id.encode("utf-8"))
         return Entity.from_dict(json.loads(raw)) if raw else None
+
+    # ------------------------------------------------------------------
+    # Storage management
+    # ------------------------------------------------------------------
+
+    def stats(self) -> dict:
+        """Cheap entry counts per logical table - uses LMDB's native stat(),
+        not manual iteration."""
+        with self._store.txn() as t:
+            return {
+                "relationships": t.count("relationships"),
+                "versions": t.count("versions"),
+                "assertions": t.count("assertions"),
+                "entities": t.count("entities"),
+                "sources": t.count("sources"),
+            }
+
+    def backup(self, path: str) -> None:
+        """A compacted, self-contained copy of the current database at `path`."""
+        self._store.backup(path)
+
+    def dump(self, path: str) -> None:
+        """Schema-independent JSON-lines export of the logical facts
+        (subject/predicate/object/valid_from/valid_to/confidence, sorted by
+        valid_from) - not internal ids or system-time, which a raw storage
+        copy would preserve but a schema change would invalidate. Pair with
+        coredb.restore() to migrate across a schema change."""
+        with self._store.txn() as t:
+            versions = [RelationshipVersion.from_dict(json.loads(v))
+                        for _, v in t.range_iter("versions", _VERSIONS_LOW, _VERSIONS_HIGH)]
+        versions.sort(key=lambda v: v.valid_from)
+        with open(path, "w", encoding="utf-8") as f:
+            for v in versions:
+                record = {
+                    "subject_id": v.subject_id, "predicate": v.predicate, "object_id": v.object_id,
+                    "valid_from": v.valid_from, "valid_to": v.valid_to, "confidence": v.confidence,
+                }
+                f.write(json.dumps(record) + "\n")
 
     # ------------------------------------------------------------------
     # DSL entrypoint - lazy import to keep engine.py decoupled from the

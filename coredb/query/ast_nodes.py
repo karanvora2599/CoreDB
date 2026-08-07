@@ -19,10 +19,21 @@ Pattern = tuple[Term, Term, Term]
 
 
 @dataclass
+class WhereClause:
+    """`WHERE confidence <comparator> <value>` - the only supported field
+    is confidence for now (TGQL v0.2)."""
+    field: str
+    comparator: str
+    value: float
+
+
+@dataclass
 class MatchQuery:
     pattern: Pattern
     on_date: str
     known_by: str | None = None
+    where: WhereClause | None = None
+    limit: int | None = None
 
 
 @dataclass
@@ -30,6 +41,8 @@ class HistoryQuery:
     pattern: Pattern
     start: str | None = None
     end: str | None = None
+    where: WhereClause | None = None
+    limit: int | None = None
 
 
 @dataclass
@@ -52,3 +65,16 @@ class SeriesQuery:
     start: str
     end: str
     resolution_days: int = 1
+
+
+@dataclass
+class AssertStatement:
+    pattern: Pattern
+    valid_from: str
+    confidence: float | None = None
+
+
+@dataclass
+class RetractStatement:
+    pattern: Pattern
+    valid_to: str

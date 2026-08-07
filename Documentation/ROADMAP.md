@@ -17,18 +17,29 @@ That's a large research-and-engineering direction. Each milestone below delibera
 - `GraphDelta` — `DIFF`'s result reshaped from a flat list of rows-with-status into a structured datatype (`nodes_added`/`nodes_removed`/`edges_opened`/`edges_closed`/`edges_persisted`), with node sets netted against churn.
 - DSL: new `SERIES ... BETWEEN ... AND ... [RESOLUTION '<N>d']` statement.
 
+## Milestone 3 — done
+
+Hardening pass: TGQL grew a version number and a spec (`TGQL_SPEC.md`), reliability gaps were closed, and basic storage-management tooling was added.
+
+- **TGQL v0.2**: `ASSERT`/`RETRACT` write statements (DSL is no longer read-only), `WHERE confidence <op> <value>` and `LIMIT <n>` on `MATCH`/`HISTORY`, line comments (`//`).
+- **Reliability**: `coredb/errors.py` (`ValidationError`/`StorageError`/`SchemaVersionError`), input validation on every mutation method (rejects NUL bytes in identifiers, malformed dates, inverted intervals), a real fix for a latent bug where `sync_snapshot`'s confirm branch could move `last_confirmed` backwards on out-of-order dates, and `lmdb.MapFullError` wrapped into a clear `StorageError` instead of a raw LMDB exception.
+- **Storage management**: schema-version marker with a loud `SchemaVersionError` on mismatch, `Database.stats()`, `Database.backup()` (compacted LMDB copy), `Database.dump()`/`coredb.restore()` (schema-independent JSON-lines migration path), `coredb.open(path, map_size=...)`.
+
 ## Explicitly deferred (not built yet)
 
 These come from a broader architectural vision shared during design discussion. They're real, well-motivated ideas — deferred for scoping reasons, not rejected:
 
-- **`TRACK` / `GraphSignal`** — turning an arbitrary graph function (degree, centrality, edge weight) into a time series joinable with external series (e.g. correlating structural graph change with market volatility). This is likely the next milestone after M2, since `GraphSeries` is the foundation it needs to sit on.
-- **Provenance / `WHY_CHANGED`** — tracing a relationship's confidence change back through its `Assertion` records to the original sources. The data model (M2) already captures what's needed (`assertion_ids`, `source_id`, `event_time`/`published_at`/`ingested_at`); the query surface to walk that lineage isn't built.
+- **`TRACK` / `GraphSignal`** — turning an arbitrary graph function (degree, centrality, edge weight) into a time series joinable with external series (e.g. correlating structural graph change with market volatility). This is likely the next milestone, since `GraphSeries` is the foundation it needs to sit on.
+- **Provenance / `WHY_CHANGED`** — tracing a relationship's confidence change back through its `Assertion` records to the original sources. The data model already captures what's needed (`assertion_ids`, `source_id`, `event_time`/`published_at`/`ingested_at`); the query surface to walk that lineage isn't built.
 - **Change-point detection** — native `CHANGEPOINTS` operator over a `GraphSeries` to surface structural regime shifts, instead of requiring a separate offline ML job.
 - **Multi-hop traversal** — patterns are single-hop `(subject, predicate, object)` triples today, matching the star-topology scope of the original `Knowledge_Graph` app (generalized beyond its hardcoded hub, but not generalized to path queries like `(a)-[*1..2]-(b)`). Temporal path queries (`PATH HISTORY`, `FIRST_CONNECTED`, `PATH_STABILITY`) depend on this.
 - **Motif evolution** — tracking when a structural pattern (not just a single edge) emerges, dissolves, or recurs.
 - **Streaming / continuous queries** — `SUBSCRIBE TO CHANGES(...)` over live ingestion, unifying historical and future-facing queries in one model.
 - **Query optimizer** — right now every query method picks its own access path in Python (bound subject → `spo_idx`, bound object → `ops_idx`, neither → full scan). A real operator tree with cost-based planning (e.g. choosing between reconstructing two snapshots vs. a direct delta scan) is future work, not attempted yet.
 - **Server / wire protocol / PostgreSQL** — CoreDB stays an embedded library for now. A client-server mode (whether on top of LMDB or a different backend) is a deliberate non-goal until multi-process/multi-user access is actually needed.
+- **Automatic map-size growth and multi-process write coordination** — `MapFullError` is caught and explained (M3), but growing the map automatically would require safely replaying an arbitrary caller-supplied transaction, which isn't generalizable; multi-process writers are untested.
+- **`WHERE` beyond `confidence`, and on `DIFF`/`RANGE`/`SERIES`** — see `TGQL_SPEC.md`'s "Not yet supported" section.
+- **`ASSERT ... SOURCE '<url>'`** — provenance attachment from TGQL; sources remain Python-API-only for now.
 - **Benchmark suite** — a dedicated benchmark (`GraphTSBench`-style: `AS_OF`, bitemporal reconstruction, `HISTORY`, `DIFF`, `TRACK`, change-point, provenance, cross-modal joins) to measure latency/storage/reconstruction cost as the engine matures.
 
 ## Known limitations to revisit as scale increases

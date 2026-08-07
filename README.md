@@ -1,6 +1,6 @@
 # CoreDB
 
-CoreDB is an embedded **bitemporal graph database**: a graph whose edges have two independent time axes — *valid time* (when a relationship was true in the world) and *system time* (when this database learned about or closed it) — queried through a custom temporal DSL instead of one-off application code.
+CoreDB is an embedded **bitemporal graph database**: a graph whose edges have two independent time axes — *valid time* (when a relationship was true in the world) and *system time* (when this database learned about or closed it) — queried through **TGQL** (Temporal Graph Query Language), a custom query language, instead of one-off application code.
 
 The core abstraction isn't "give me the graph at time `t`." It's the evolution of the graph over an interval — who a relationship connected, how it changed, and what the database *knew* at any point in the past. A normal graph database answers questions about `G`. CoreDB answers questions about `G(t)` and, increasingly, about the evolution operator over `[t0, t1]`.
 
@@ -8,8 +8,9 @@ This project generalizes a pattern first proven in [`Knowledge_Graph`](../Knowle
 
 ## Status
 
-- **Milestone 1** (done): embedded engine on LMDB, flat interval-valued facts, `MATCH`/`HISTORY`/`DIFF`/`RANGE` DSL.
-- **Milestone 2** (done): evidence-based data model (`Entity`/`Relationship`/`RelationshipVersion`/`Assertion`), `GraphSeries` (lazy interval view) and `GraphDelta` (structured diff datatype), `SERIES` DSL statement.
+- **Milestone 1** (done): embedded engine on LMDB, flat interval-valued facts, TGQL v0.1 (`MATCH`/`HISTORY`/`DIFF`/`RANGE`).
+- **Milestone 2** (done): evidence-based data model (`Entity`/`Relationship`/`RelationshipVersion`/`Assertion`), `GraphSeries` (lazy interval view) and `GraphDelta` (structured diff datatype), TGQL `SERIES` statement.
+- **Milestone 3** (done): TGQL v0.2 (`ASSERT`/`RETRACT` write statements, `WHERE`/`LIMIT` filtering, comments), input validation + a `coredb/errors.py` exception hierarchy, storage management (`stats`/`backup`/`dump`/`restore`, schema versioning, clear errors on a full LMDB map).
 - See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deliberately deferred (`TRACK`/`GraphSignal`, provenance queries, change-point detection, multi-hop traversal, a server mode).
 
 ## Install
@@ -20,7 +21,7 @@ python -m venv .venv
 # source .venv/bin/activate && pip install -e ".[dev]"  # macOS/Linux
 ```
 
-Dependencies: [`lmdb`](https://pypi.org/project/lmdb/) (embedded storage engine) and [`lark`](https://pypi.org/project/lark/) (DSL parser). No server, no network dependency — CoreDB is a linkable library, like SQLite.
+Dependencies: [`lmdb`](https://pypi.org/project/lmdb/) (embedded storage engine) and [`lark`](https://pypi.org/project/lark/) (TGQL parser). No server, no network dependency — CoreDB is a linkable library, like SQLite.
 
 ## Quickstart
 
@@ -42,23 +43,30 @@ db.retract_fact("NVIDIA", "SUPPLIED_BY", "TSMC", valid_to="2026-06-01")
 # present. Useful for periodic ingestion (e.g. one call per day).
 db.sync_snapshot("NVIDIA", "CO_OCCURS_WITH", {"AI": 5, "Google": 2}, as_of_date="2026-01-01")
 
-# Query via the DSL - patterns are (subject, predicate, object) with `?var`
-# wildcards.
-db.execute("MATCH (NVIDIA, CO_OCCURS_WITH, ?o) AS OF '2026-01-01'")
+# Query and write via TGQL - patterns are (subject, predicate, object) with
+# `?var` wildcards; ASSERT/RETRACT are the write statements.
+db.execute("ASSERT (NVIDIA, SUPPLIED_BY, Samsung) VALID FROM '2026-02-01' CONFIDENCE 0.6")
+db.execute("MATCH (NVIDIA, CO_OCCURS_WITH, ?o) AS OF '2026-01-01' WHERE confidence > 0.5")
 db.execute("HISTORY (NVIDIA, CO_OCCURS_WITH, AI)")
 db.execute("DIFF BETWEEN '2026-01-01' AND '2026-01-10' FOR (NVIDIA, ?p, ?o)")
 db.execute("SERIES (NVIDIA, CO_OCCURS_WITH, ?o) BETWEEN '2026-01-01' AND '2026-01-10'")
 
+# Storage management.
+db.stats()               # entry counts per table
+db.backup("my_graph_backup.db")   # compacted, self-contained copy
+db.dump("my_graph_dump.jsonl")    # schema-independent export
+
 db.close()
 ```
 
-Or use the Python API directly (`db.as_of(...)`, `db.history(...)`, `db.diff_delta(...)`, `db.series(...)`) without the DSL — see [`Documentation/QUERY_LANGUAGE.md`](Documentation/QUERY_LANGUAGE.md).
+Or use the Python API directly (`db.as_of(...)`, `db.history(...)`, `db.diff_delta(...)`, `db.series(...)`) without TGQL — see [`Documentation/QUERY_LANGUAGE.md`](Documentation/QUERY_LANGUAGE.md).
 
 ## Documentation
 
-- [`Documentation/ARCHITECTURE.md`](Documentation/ARCHITECTURE.md) — module layout, storage engine choice, LMDB table/index design.
+- [`Documentation/ARCHITECTURE.md`](Documentation/ARCHITECTURE.md) — module layout, storage engine choice, LMDB table/index design, concurrency and storage-management notes.
 - [`Documentation/DATA_MODEL.md`](Documentation/DATA_MODEL.md) — `Entity`/`Relationship`/`RelationshipVersion`/`Assertion`, the bitemporal axes, a worked example.
-- [`Documentation/QUERY_LANGUAGE.md`](Documentation/QUERY_LANGUAGE.md) — DSL grammar reference and result shapes for every statement.
+- [`Documentation/TGQL_SPEC.md`](Documentation/TGQL_SPEC.md) — the full, versioned TGQL grammar reference.
+- [`Documentation/QUERY_LANGUAGE.md`](Documentation/QUERY_LANGUAGE.md) — a short pointer into the spec, plus the Python-API equivalents.
 - [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) — what's built, what's deliberately deferred, and why.
 
 ## Running tests

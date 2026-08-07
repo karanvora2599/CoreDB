@@ -7,11 +7,18 @@ assertions_by_version, entities, sources, counters. LMDB's memory-mapped
 B+tree gives cheap sorted range iteration for free, which is exactly what
 the temporal indexes need.
 """
+import os
 import struct
 
 import lmdb
 
+from ..errors import StorageError
 from .kvstore import KVStore, Transaction
+
+_MAP_FULL_MESSAGE = (
+    "LMDB map is full - reopen the database with a larger map_size, "
+    "e.g. coredb.open(path, map_size=<bytes>)."
+)
 
 TABLES = [
     "relationships",
@@ -42,10 +49,16 @@ class LMDBTransaction(Transaction):
         return self._txn.get(key, db=self._dbis[table])
 
     def put(self, table: str, key: bytes, value: bytes) -> None:
-        self._txn.put(key, value, db=self._dbis[table])
+        try:
+            self._txn.put(key, value, db=self._dbis[table])
+        except lmdb.MapFullError as e:
+            raise StorageError(_MAP_FULL_MESSAGE) from e
 
     def delete(self, table: str, key: bytes) -> None:
         self._txn.delete(key, db=self._dbis[table])
+
+    def count(self, table: str) -> int:
+        return self._txn.stat(db=self._dbis[table])["entries"]
 
     def range_iter(self, table: str, start: bytes, end: bytes):
         cursor = self._txn.cursor(db=self._dbis[table])
@@ -60,12 +73,15 @@ class LMDBTransaction(Transaction):
         raw = self._txn.get(counter_name.encode(), db=self._dbis["counters"])
         current = struct.unpack(">Q", raw)[0] if raw else 0
         nxt = current + 1
-        self._txn.put(counter_name.encode(), struct.pack(">Q", nxt), db=self._dbis["counters"])
+        self.put("counters", counter_name.encode(), struct.pack(">Q", nxt))
         return nxt
 
     def commit(self) -> None:
         if not self._done:
-            self._txn.commit()
+            try:
+                self._txn.commit()
+            except lmdb.MapFullError as e:
+                raise StorageError(_MAP_FULL_MESSAGE) from e
             self._done = True
 
     def abort(self) -> None:
@@ -84,3 +100,12 @@ class LMDBStore(KVStore):
 
     def close(self) -> None:
         self._env.close()
+
+    def backup(self, path: str) -> None:
+        """A compacted, self-contained copy of the current database state -
+        safe to call while the database is open and in use. `path` is a
+        directory (LMDB uses subdir mode: a database is a directory
+        containing data.mdb/lock.mdb, not a single file) - it's created if
+        missing, and must be empty."""
+        os.makedirs(path, exist_ok=True)
+        self._env.copy(path, compact=True)

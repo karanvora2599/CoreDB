@@ -2,13 +2,43 @@
 plain dict/list[dict] results - no HTTP/JSON-response shaping, since this
 is a library concern, not a service concern.
 """
-from .ast_nodes import DiffQuery, HistoryQuery, MatchQuery, Pattern, RangeQuery, SeriesQuery
+import operator
+
+from ..errors import ValidationError
+from .ast_nodes import (
+    AssertStatement, DiffQuery, HistoryQuery, MatchQuery, Pattern, RangeQuery,
+    RetractStatement, SeriesQuery, WhereClause,
+)
 
 _FIELD_BY_POSITION = ("subject_id", "predicate", "object_id")
+
+_COMPARATORS = {
+    ">": operator.gt, "<": operator.lt, ">=": operator.ge, "<=": operator.le,
+    "=": operator.eq, "!=": operator.ne,
+}
 
 
 def _pattern_values(pattern: Pattern) -> tuple:
     return tuple(t.value for t in pattern)
+
+
+def _require_literal_pattern(pattern: Pattern) -> tuple:
+    """ASSERT/RETRACT write to one specific triple - '?' wildcards don't
+    make sense there."""
+    if any(term.is_var for term in pattern):
+        raise ValidationError("ASSERT/RETRACT patterns must be fully literal - '?' wildcards aren't allowed")
+    return _pattern_values(pattern)
+
+
+def _apply_where(versions: list, where: WhereClause | None) -> list:
+    if where is None:
+        return versions
+    op = _COMPARATORS[where.comparator]
+    return [v for v in versions if v.confidence is not None and op(v.confidence, where.value)]
+
+
+def _apply_limit(items: list, limit: int | None) -> list:
+    return items if limit is None else items[:limit]
 
 
 def _bindings(version, pattern: Pattern) -> dict:
@@ -31,11 +61,13 @@ def execute(db, ast) -> list[dict] | dict:
         pattern_vals = _pattern_values(ast.pattern)
         versions = (db.as_known(pattern_vals, ast.on_date, ast.known_by)
                     if ast.known_by is not None else db.as_of(pattern_vals, ast.on_date))
+        versions = _apply_limit(_apply_where(versions, ast.where), ast.limit)
         return [_row(v, ast.pattern) for v in versions]
 
     if isinstance(ast, HistoryQuery):
         pattern_vals = _pattern_values(ast.pattern)
         versions = db.history(pattern_vals, ast.start, ast.end)
+        versions = _apply_limit(_apply_where(versions, ast.where), ast.limit)
         return [_row(v, ast.pattern) for v in versions]
 
     if isinstance(ast, DiffQuery):
@@ -60,5 +92,15 @@ def execute(db, ast) -> list[dict] | dict:
         pattern_vals = _pattern_values(ast.pattern)
         gs = db.series(pattern_vals, ast.start, ast.end, ast.resolution_days)
         return [{"date": d, "facts": [_row(v, ast.pattern) for v in snapshot]} for d, snapshot in gs]
+
+    if isinstance(ast, AssertStatement):
+        subject, predicate, obj = _require_literal_pattern(ast.pattern)
+        vid = db.assert_fact(subject, predicate, obj, ast.valid_from, confidence=ast.confidence)
+        return {"version_id": vid}
+
+    if isinstance(ast, RetractStatement):
+        subject, predicate, obj = _require_literal_pattern(ast.pattern)
+        vid = db.retract_fact(subject, predicate, obj, ast.valid_to)
+        return {"version_id": vid}
 
     raise TypeError(f"unknown AST node: {ast!r}")

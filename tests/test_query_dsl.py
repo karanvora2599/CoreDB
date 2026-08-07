@@ -1,4 +1,9 @@
-from coredb.query.ast_nodes import DiffQuery, HistoryQuery, MatchQuery, RangeQuery, SeriesQuery
+import pytest
+
+import coredb
+from coredb.query.ast_nodes import (
+    AssertStatement, DiffQuery, HistoryQuery, MatchQuery, RangeQuery, RetractStatement, SeriesQuery,
+)
 from coredb.query.parser import parse
 
 
@@ -51,6 +56,40 @@ def test_parse_series_default_and_explicit_resolution():
     assert ast2.resolution_days == 5
 
 
+def test_parse_assert_and_retract():
+    ast = parse("ASSERT (NVIDIA, SUPPLIED_BY, TSMC) VALID FROM '2026-01-01' CONFIDENCE 0.9")
+    assert isinstance(ast, AssertStatement)
+    assert ast.pattern[2].value == "TSMC"
+    assert ast.valid_from == "2026-01-01"
+    assert ast.confidence == 0.9
+
+    ast2 = parse("ASSERT (NVIDIA, SUPPLIED_BY, TSMC) VALID FROM '2026-01-01'")
+    assert ast2.confidence is None
+
+    ast3 = parse("RETRACT (NVIDIA, SUPPLIED_BY, TSMC) VALID TO '2026-06-01'")
+    assert isinstance(ast3, RetractStatement)
+    assert ast3.valid_to == "2026-06-01"
+
+
+def test_parse_where_and_limit_on_match_and_history():
+    ast = parse("MATCH (NVIDIA, ?p, ?o) AS OF '2026-01-01' WHERE confidence > 0.5 LIMIT 3")
+    assert ast.where.comparator == ">" and ast.where.value == 0.5
+    assert ast.limit == 3
+
+    ast2 = parse("HISTORY (NVIDIA, SUPPLIED_BY, TSMC) WHERE confidence >= 0.9")
+    assert ast2.where.comparator == ">=" and ast2.where.value == 0.9
+    assert ast2.limit is None
+
+
+def test_parse_ignores_line_comments():
+    ast = parse("""
+    // a leading comment
+    MATCH (NVIDIA, ?p, ?o) AS OF '2026-01-01' // trailing comment
+    """)
+    assert isinstance(ast, MatchQuery)
+    assert ast.on_date == "2026-01-01"
+
+
 def test_executor_match_matches_direct_engine_call(db):
     db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
     direct = db.as_of(("NVIDIA", "SUPPLIED_BY", None), "2026-01-05")
@@ -101,3 +140,30 @@ def test_executor_series_matches_direct_engine_call(db):
     assert [r["date"] for r in rows] == ["2026-01-01", "2026-01-02", "2026-01-03"]
     assert {f["bindings"]["o"] for f in rows[0]["facts"]} == {"AI"}
     assert {f["bindings"]["o"] for f in rows[2]["facts"]} == {"AI", "AMD"}
+
+
+def test_executor_assert_and_retract_mutate_the_database(db):
+    result = db.execute("ASSERT (NVIDIA, SUPPLIED_BY, TSMC) VALID FROM '2026-01-01' CONFIDENCE 0.9")
+    assert "version_id" in result
+    facts = db.as_of(("NVIDIA", "SUPPLIED_BY", "TSMC"), "2026-01-05")
+    assert len(facts) == 1 and facts[0].confidence == 0.9
+
+    db.execute("RETRACT (NVIDIA, SUPPLIED_BY, TSMC) VALID TO '2026-06-01'")
+    assert db.as_of(("NVIDIA", "SUPPLIED_BY", "TSMC"), "2026-07-01") == []
+
+
+def test_executor_assert_rejects_variable_pattern(db):
+    with pytest.raises(coredb.ValidationError):
+        db.execute("ASSERT (NVIDIA, ?p, TSMC) VALID FROM '2026-01-01'")
+
+
+def test_executor_where_and_limit_filter_results(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.9)
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "Samsung", "2026-01-01", confidence=0.3)
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "Intel", "2026-01-01", confidence=0.95)
+
+    rows = db.execute("HISTORY (NVIDIA, SUPPLIED_BY, ?o) WHERE confidence >= 0.5")
+    assert {r["bindings"]["o"] for r in rows} == {"TSMC", "Intel"}
+
+    limited = db.execute("HISTORY (NVIDIA, SUPPLIED_BY, ?o) LIMIT 1")
+    assert len(limited) == 1

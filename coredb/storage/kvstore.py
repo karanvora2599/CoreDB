@@ -29,6 +29,11 @@ class Transaction(ABC):
         ...
 
     @abstractmethod
+    def count(self, table: str) -> int:
+        """Number of entries in `table`, without iterating them."""
+        ...
+
+    @abstractmethod
     def commit(self) -> None: ...
 
     @abstractmethod
@@ -41,6 +46,11 @@ class KVStore(ABC):
 
     @abstractmethod
     def close(self) -> None: ...
+
+    def backup(self, path: str) -> None:
+        """Write a self-contained copy of this store to `path`. Optional -
+        backends that can't support an online copy may leave this raising."""
+        raise NotImplementedError(f"{type(self).__name__} does not support backup()")
 
     @contextmanager
     def txn(self, write: bool = False):

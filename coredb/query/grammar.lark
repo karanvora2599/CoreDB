@@ -1,10 +1,19 @@
-// Temporal graph query DSL grammar. Patterns are (subject, predicate, object)
-// triples where any position can be a literal or a `?var` wildcard.
-// MATCH (SUBJECT, ?p, ?o) AS OF '2026-03-05' [KNOWN BY '2026-03-06T00:00:00']
-// HISTORY (SUBJECT, PREDICATE, ?o) [BETWEEN 'd1' AND 'd2']
-// DIFF BETWEEN 'd1' AND 'd2' [FOR (SUBJECT, ?p, ?o)]
-// RANGE (SUBJECT, PREDICATE, ?o) BETWEEN 'd1' AND 'd2'
-// SERIES (SUBJECT, PREDICATE, ?o) BETWEEN 'd1' AND 'd2' [RESOLUTION '7d']
+// TGQL (Temporal Graph Query Language) grammar. Patterns are (subject,
+// predicate, object) triples where any position can be a literal or a
+// `?var` wildcard. // starts a line comment.
+//
+// TGQL v0.1:
+//   MATCH (SUBJECT, ?p, ?o) AS OF '2026-03-05' [KNOWN BY '2026-03-06T00:00:00']
+//   HISTORY (SUBJECT, PREDICATE, ?o) [BETWEEN 'd1' AND 'd2']
+//   DIFF BETWEEN 'd1' AND 'd2' [FOR (SUBJECT, ?p, ?o)]
+//   RANGE (SUBJECT, PREDICATE, ?o) BETWEEN 'd1' AND 'd2'
+//   SERIES (SUBJECT, PREDICATE, ?o) BETWEEN 'd1' AND 'd2' [RESOLUTION '7d']
+//
+// TGQL v0.2 additions:
+//   ASSERT (SUBJECT, PREDICATE, OBJECT) VALID FROM 'date' [CONFIDENCE 0.9]
+//   RETRACT (SUBJECT, PREDICATE, OBJECT) VALID TO 'date'
+//   ... WHERE confidence > 0.5   (MATCH/HISTORY only)
+//   ... LIMIT 10                (MATCH/HISTORY only, after WHERE)
 
 start: statement
 
@@ -13,12 +22,19 @@ statement: match_stmt
          | diff_stmt
          | range_stmt
          | series_stmt
+         | assert_stmt
+         | retract_stmt
 
-match_stmt: "MATCH"i pattern "AS"i "OF"i STRING ("KNOWN"i "BY"i STRING)?
-history_stmt: "HISTORY"i pattern ("BETWEEN"i STRING "AND"i STRING)?
+match_stmt: "MATCH"i pattern "AS"i "OF"i STRING ("KNOWN"i "BY"i STRING)? where_clause? limit_clause?
+history_stmt: "HISTORY"i pattern ("BETWEEN"i STRING "AND"i STRING)? where_clause? limit_clause?
 diff_stmt: "DIFF"i "BETWEEN"i STRING "AND"i STRING ("FOR"i pattern)?
 range_stmt: "RANGE"i pattern "BETWEEN"i STRING "AND"i STRING
 series_stmt: "SERIES"i pattern "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i STRING)?
+assert_stmt: "ASSERT"i pattern "VALID"i "FROM"i STRING ("CONFIDENCE"i NUMBER)?
+retract_stmt: "RETRACT"i pattern "VALID"i "TO"i STRING
+
+where_clause: "WHERE"i "confidence"i COMPARATOR NUMBER
+limit_clause: "LIMIT"i NUMBER
 
 pattern: "(" term "," term "," term ")"
 term: VAR | IDENTIFIER
@@ -26,6 +42,11 @@ term: VAR | IDENTIFIER
 VAR: "?" IDENTIFIER
 IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
 STRING: /'[^']*'/
+NUMBER: /-?[0-9]+(\.[0-9]+)?/
+COMPARATOR: />=|<=|!=|=|>|</
+
+COMMENT: /\/\/[^\n]*/
+%ignore COMMENT
 
 %import common.WS
 %ignore WS
