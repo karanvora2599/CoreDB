@@ -7,7 +7,7 @@ import operator
 from ..errors import ValidationError
 from .ast_nodes import (
     AssertStatement, DiffQuery, HistoryQuery, MatchQuery, Pattern, RangeQuery,
-    RetractStatement, SeriesQuery, WhereClause,
+    RetractStatement, SeriesQuery, TrackQuery, WhereClause,
 )
 
 _FIELD_BY_POSITION = ("subject_id", "predicate", "object_id")
@@ -106,5 +106,9 @@ def execute(db, ast) -> list[dict] | dict:
         subject, predicate, obj = _require_literal_pattern(ast.pattern)
         vid = db.retract_fact(subject, predicate, obj, ast.valid_to)
         return {"version_id": vid}
+
+    if isinstance(ast, TrackQuery):
+        signal = db.track(ast.metric, ast.target, ast.start, ast.end, ast.resolution_days)
+        return [{"date": d, "value": v} for d, v in signal.points]
 
     raise TypeError(f"unknown AST node: {ast!r}")

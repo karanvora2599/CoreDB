@@ -13,6 +13,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 
+def date_range(start: str, end: str, resolution_days: int = 1):
+    """Yield 'YYYY-MM-DD' strings from start to end (inclusive), stepping by
+    resolution_days. Shared by GraphSeries.dates() and engine.track(), so
+    both step through time the same way."""
+    d = datetime.strptime(start, "%Y-%m-%d").date()
+    end_d = datetime.strptime(end, "%Y-%m-%d").date()
+    step = timedelta(days=resolution_days)
+    while d <= end_d:
+        yield d.strftime("%Y-%m-%d")
+        d += step
+
+
 @dataclass
 class GraphDelta:
     """The structured result of diffing a pattern between two dates. Node
@@ -51,12 +63,7 @@ class GraphSeries:
     def dates(self):
         """Yield 'YYYY-MM-DD' strings from start to end (inclusive), stepping
         by resolution_days."""
-        d = datetime.strptime(self.start, "%Y-%m-%d").date()
-        end_d = datetime.strptime(self.end, "%Y-%m-%d").date()
-        step = timedelta(days=self.resolution_days)
-        while d <= end_d:
-            yield d.strftime("%Y-%m-%d")
-            d += step
+        yield from date_range(self.start, self.end, self.resolution_days)
 
     def __iter__(self):
         """Yield (date, snapshot) pairs at `resolution_days` steps across

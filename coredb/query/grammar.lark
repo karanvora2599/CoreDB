@@ -14,6 +14,11 @@
 //   RETRACT (SUBJECT, PREDICATE, OBJECT) VALID TO 'date'
 //   ... WHERE confidence > 0.5   (MATCH/HISTORY only)
 //   ... LIMIT 10                (MATCH/HISTORY only, after WHERE)
+//
+// TGQL v0.3 additions:
+//   TRACK DEGREE(NVIDIA) BETWEEN 'd1' AND 'd2' [RESOLUTION '7d']
+//   TRACK WEIGHTED_DEGREE(NVIDIA) BETWEEN 'd1' AND 'd2'
+//   TRACK EDGE_WEIGHT(SUBJECT, PREDICATE, OBJECT) BETWEEN 'd1' AND 'd2'
 
 start: statement
 
@@ -24,6 +29,7 @@ statement: match_stmt
          | series_stmt
          | assert_stmt
          | retract_stmt
+         | track_stmt
 
 match_stmt: "MATCH"i pattern "AS"i "OF"i STRING ("KNOWN"i "BY"i STRING)? where_clause? limit_clause?
 history_stmt: "HISTORY"i pattern ("BETWEEN"i STRING "AND"i STRING)? where_clause? limit_clause?
@@ -32,6 +38,7 @@ range_stmt: "RANGE"i pattern "BETWEEN"i STRING "AND"i STRING
 series_stmt: "SERIES"i pattern "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i STRING)?
 assert_stmt: "ASSERT"i pattern "VALID"i "FROM"i STRING ("CONFIDENCE"i NUMBER)?
 retract_stmt: "RETRACT"i pattern "VALID"i "TO"i STRING
+track_stmt: "TRACK"i IDENTIFIER "(" IDENTIFIER ("," IDENTIFIER "," IDENTIFIER)? ")" "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i STRING)?
 
 where_clause: "WHERE"i "confidence"i COMPARATOR NUMBER
 limit_clause: "LIMIT"i NUMBER

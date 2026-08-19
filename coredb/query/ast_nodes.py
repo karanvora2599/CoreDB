@@ -78,3 +78,12 @@ class AssertStatement:
 class RetractStatement:
     pattern: Pattern
     valid_to: str
+
+
+@dataclass
+class TrackQuery:
+    metric: str                  # "degree" | "weighted_degree" | "edge_weight"
+    target: str | tuple          # entity_id, or (subject, predicate, object) for edge_weight
+    start: str
+    end: str
+    resolution_days: int = 1

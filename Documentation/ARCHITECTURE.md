@@ -8,19 +8,20 @@ coredb/
 ├── model.py                # Entity, Relationship, RelationshipVersion, Assertion, Source
 ├── errors.py                # CoreDBError, ValidationError, StorageError, SchemaVersionError, QueryError
 ├── engine.py                # Database: mutation + query + storage-management methods
-├── series.py                # GraphSeries (lazy interval view), GraphDelta (structured diff)
+├── series.py                # GraphSeries (lazy interval view), GraphDelta (structured diff), date_range()
+├── signal.py                # GraphSignal (metric evaluated across time, joinable against external data)
 ├── storage/
 │   ├── kvstore.py           # KVStore/Transaction interface - engine.py never talks to LMDB directly
 │   ├── lmdb_backend.py       # LMDB implementation of KVStore
 │   └── keys.py               # composite key encoding for LMDB's sorted byte-string keys
 └── query/
     ├── grammar.lark          # Lark grammar for TGQL (coredb/query language)
-    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement
+    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery
     ├── parser.py              # Lark parse tree -> AST
     └── executor.py            # AST -> engine.py calls -> plain dict/list[dict] results
 ```
 
-`engine.py` is the only module that talks to `storage/`. `query/` never imports `engine.py` — `Database.execute()` imports `query.parser`/`query.executor` lazily, so the dependency only goes one direction (engine → query at call time, never query → engine at import time). This is why `engine.py` can freely import `GraphDelta`/`GraphSeries` from `series.py` without a circular import: `series.py` holds a duck-typed reference to the database rather than importing `engine.py`.
+`engine.py` is the only module that talks to `storage/`. `query/` never imports `engine.py` — `Database.execute()` imports `query.parser`/`query.executor` lazily, so the dependency only goes one direction (engine → query at call time, never query → engine at import time). This is why `engine.py` can freely import `GraphDelta`/`GraphSeries` from `series.py` (and `GraphSignal` from `signal.py`) without a circular import: neither module imports `engine.py` — the `db` each one holds is duck-typed.
 
 ## Storage engine: why LMDB
 

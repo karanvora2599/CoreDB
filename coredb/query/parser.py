@@ -9,10 +9,13 @@ from lark.exceptions import LarkError, VisitError
 from ..errors import CoreDBError, QueryError
 from .ast_nodes import (
     AssertStatement, DiffQuery, HistoryQuery, MatchQuery, RangeQuery,
-    RetractStatement, SeriesQuery, Term, WhereClause,
+    RetractStatement, SeriesQuery, Term, TrackQuery, WhereClause,
 )
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
+
+# metric name -> number of target identifiers TRACK expects in parens.
+_METRIC_ARITY = {"degree": 1, "weighted_degree": 1, "edge_weight": 3}
 
 
 def _unquote(token) -> str:
@@ -103,6 +106,28 @@ class _ASTBuilder(Transformer):
         pattern = children[0]
         valid_to = _unquote(children[1])
         return RetractStatement(pattern=pattern, valid_to=valid_to)
+
+    def track_stmt(self, children):
+        identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]
+        strings = [c for c in children if getattr(c, "type", None) == "STRING"]
+        metric = str(identifiers[0]).lower()
+        target_args = identifiers[1:]
+
+        arity = _METRIC_ARITY.get(metric)
+        if arity is None:
+            raise QueryError(
+                f"unknown TRACK metric {metric!r} - expected one of {sorted(_METRIC_ARITY)}"
+            )
+        if len(target_args) != arity:
+            raise QueryError(
+                f"TRACK {metric.upper()} takes {arity} argument(s), got {len(target_args)}"
+            )
+        target = str(target_args[0]) if arity == 1 else tuple(str(a) for a in target_args)
+
+        start = _unquote(strings[0])
+        end = _unquote(strings[1])
+        resolution_days = _parse_resolution(strings[2]) if len(strings) > 2 else 1
+        return TrackQuery(metric=metric, target=target, start=start, end=end, resolution_days=resolution_days)
 
     def statement(self, children):
         return children[0]

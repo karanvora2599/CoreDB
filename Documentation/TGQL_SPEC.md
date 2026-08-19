@@ -108,17 +108,46 @@ Optional trailing clause on `MATCH` and `HISTORY` only, applied after `WHERE`. S
 MATCH (NVIDIA, ?p, ?o) AS OF '2026-01-01' WHERE confidence > 0.5 LIMIT 10
 ```
 
+## TGQL v0.3 (graph metrics as time series)
+
+### `TRACK <METRIC>(<args>) BETWEEN '<date>' AND '<date>' [RESOLUTION '<N>d']`
+
+Evaluates a graph metric at each resolution step across an interval, turning it into a plain time series (a `GraphSignal` under the hood — see `Database.track()`/`coredb/signal.py`). `<METRIC>` is a plain identifier (not a fixed grammar keyword), so future metrics only need a registry entry, not a grammar change.
+
+Supported metrics — what's honestly computable on the current single-hop model (see "Not yet supported" for what isn't):
+
+| Metric | Args | Meaning |
+|---|---|---|
+| `DEGREE(entity)` | 1 | Count of relationships touching `entity` (as subject or object), deduplicated by relationship |
+| `WEIGHTED_DEGREE(entity)` | 1 | Same, summing `confidence` instead of counting (`None` treated as `0.0`) |
+| `EDGE_WEIGHT(subject, predicate, object)` | 3 | The confidence of one specific relationship, or `null` when it isn't open |
+
+```
+TRACK DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-31'
+TRACK WEIGHTED_DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-31' RESOLUTION '7d'
+TRACK EDGE_WEIGHT(NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-01-31'
+```
+
+An unknown metric name or wrong argument count raises `coredb.QueryError`.
+
+**Result:** `list[dict]` — `[{"date": ..., "value": ...}, ...]`.
+
+Joining a signal against external (non-graph) data — e.g. correlating `DEGREE` against a price series — is Python-API-only in v0.3: `db.track(...)` returns a `GraphSignal`, and `GraphSignal.join(other: dict)` does an inner join on date. This isn't expressible in TGQL's string syntax since it needs caller-supplied data, the same reason `ASSERT ... SOURCE` stays Python-only.
+
 ## Not yet supported
 
-These are deliberately out of scope for v0.1/v0.2 — see `Documentation/ROADMAP.md` for the fuller picture of what's deferred and why:
+These are deliberately out of scope so far — see `Documentation/ROADMAP.md` for the fuller picture of what's deferred and why:
 
 - Multi-hop patterns (`(a)-[]->(b)-[]->(c)` chains) — every statement is single-hop.
-- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, or `SERIES` — their result shapes (a single delta object, an aggregate list, a stepped series) don't map onto a single-field row filter as cleanly as `MATCH`/`HISTORY`'s flat version lists do.
+- **Centrality-family metrics** (betweenness, closeness, PageRank) for `TRACK` — these need multi-hop graph traversal to mean anything; only `DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT` are honestly computable without it.
+- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, or `TRACK` — their result shapes (a single delta object, an aggregate list, a stepped series/signal) don't map onto a single-field row filter as cleanly as `MATCH`/`HISTORY`'s flat version lists do.
 - `WHERE` on any field other than `confidence` — no query planner support yet for filtering on `properties` or other fields.
 - `ASSERT ... SOURCE '<url>'` — attaching provenance from the DSL. Sources are still Python-API-only (`sources=[...]` on `assert_fact`/`sync_snapshot`).
+- `GraphSignal.join()` from TGQL — see above.
 - `ORDER BY` — `HISTORY` is always chronological; there's no way to sort `MATCH` results yet.
 
 ## Version history
 
 - **v0.1** — `MATCH`/`HISTORY`/`DIFF`/`RANGE`/`SERIES`, read-only.
 - **v0.2** — `ASSERT`/`RETRACT` write statements, `WHERE`/`LIMIT` on `MATCH`/`HISTORY`, line comments.
+- **v0.3** — `TRACK` (`DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT`), turning a graph metric into a time series.

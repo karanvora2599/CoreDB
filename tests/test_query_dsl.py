@@ -3,6 +3,7 @@ import pytest
 import coredb
 from coredb.query.ast_nodes import (
     AssertStatement, DiffQuery, HistoryQuery, MatchQuery, RangeQuery, RetractStatement, SeriesQuery,
+    TrackQuery,
 )
 from coredb.query.parser import parse
 
@@ -100,6 +101,32 @@ def test_parse_raises_query_error_on_unsupported_resolution_unit():
         parse("SERIES (X, REL, ?o) BETWEEN '2026-01-01' AND '2026-01-10' RESOLUTION '5w'")
 
 
+def test_parse_track_degree_and_weighted_degree():
+    ast = parse("TRACK DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
+    assert isinstance(ast, TrackQuery)
+    assert ast.metric == "degree"
+    assert ast.target == "NVIDIA"
+    assert ast.start == "2026-01-01" and ast.end == "2026-01-10"
+    assert ast.resolution_days == 1
+
+    ast2 = parse("TRACK WEIGHTED_DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10' RESOLUTION '7d'")
+    assert ast2.metric == "weighted_degree"
+    assert ast2.resolution_days == 7
+
+
+def test_parse_track_edge_weight():
+    ast = parse("TRACK EDGE_WEIGHT(NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-01-10'")
+    assert ast.metric == "edge_weight"
+    assert ast.target == ("NVIDIA", "SUPPLIED_BY", "TSMC")
+
+
+def test_parse_track_rejects_unknown_metric_and_wrong_arity():
+    with pytest.raises(coredb.QueryError):
+        parse("TRACK BETWEENNESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
+    with pytest.raises(coredb.QueryError):
+        parse("TRACK DEGREE(NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-01-10'")
+
+
 def test_executor_match_matches_direct_engine_call(db):
     db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
     direct = db.as_of(("NVIDIA", "SUPPLIED_BY", None), "2026-01-05")
@@ -186,3 +213,11 @@ def test_executor_where_and_limit_filter_results(db):
 
     limited = db.execute("HISTORY (NVIDIA, SUPPLIED_BY, ?o) LIMIT 1")
     assert len(limited) == 1
+
+
+def test_executor_track_matches_direct_engine_call(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.5)
+
+    direct = db.track("degree", "NVIDIA", "2026-01-01", "2026-01-03")
+    rows = db.execute("TRACK DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-03'")
+    assert [(r["date"], r["value"]) for r in rows] == direct.points

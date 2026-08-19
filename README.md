@@ -11,7 +11,8 @@ This project generalizes a pattern first proven in [`Knowledge_Graph`](../Knowle
 - **Milestone 1** (done): embedded engine on LMDB, flat interval-valued facts, TGQL v0.1 (`MATCH`/`HISTORY`/`DIFF`/`RANGE`).
 - **Milestone 2** (done): evidence-based data model (`Entity`/`Relationship`/`RelationshipVersion`/`Assertion`), `GraphSeries` (lazy interval view) and `GraphDelta` (structured diff datatype), TGQL `SERIES` statement.
 - **Milestone 3** (done): TGQL v0.2 (`ASSERT`/`RETRACT` write statements, `WHERE`/`LIMIT` filtering, comments), input validation + a `coredb/errors.py` exception hierarchy, storage management (`stats`/`backup`/`dump`/`restore`, schema versioning, clear errors on a full LMDB map).
-- See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deliberately deferred (`TRACK`/`GraphSignal`, provenance queries, change-point detection, multi-hop traversal, a server mode).
+- **Milestone 4** (done): TGQL v0.3 (`TRACK`), turning a graph metric (`DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT`) into a `GraphSignal` time series joinable against external (non-graph) data.
+- See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deliberately deferred (centrality-family metrics, provenance queries, change-point detection, multi-hop traversal, a server mode).
 
 ## Install
 
@@ -50,6 +51,11 @@ db.execute("MATCH (NVIDIA, CO_OCCURS_WITH, ?o) AS OF '2026-01-01' WHERE confiden
 db.execute("HISTORY (NVIDIA, CO_OCCURS_WITH, AI)")
 db.execute("DIFF BETWEEN '2026-01-01' AND '2026-01-10' FOR (NVIDIA, ?p, ?o)")
 db.execute("SERIES (NVIDIA, CO_OCCURS_WITH, ?o) BETWEEN '2026-01-01' AND '2026-01-10'")
+
+# Turn a graph metric into a time series, and correlate it with external data.
+db.execute("TRACK DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
+signal = db.track("degree", "NVIDIA", "2026-01-01", "2026-01-10")
+signal.join({"2026-01-05": 134.2})   # inner join against e.g. price data, by date
 
 # Storage management.
 db.stats()               # entry counts per table

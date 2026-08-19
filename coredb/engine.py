@@ -20,7 +20,8 @@ from datetime import date, datetime, timezone
 
 from .errors import SchemaVersionError, ValidationError
 from .model import Assertion, Entity, RelationshipVersion
-from .series import GraphDelta, GraphSeries
+from .series import GraphDelta, GraphSeries, date_range
+from .signal import GraphSignal
 from .storage import keys as K
 from .storage.kvstore import KVStore
 
@@ -454,6 +455,51 @@ class Database:
         """A lazy view over `pattern`'s history across [start, end] - nothing
         is precomputed here; snapshots/diffs are resolved on demand."""
         return GraphSeries(self, pattern, start, end, resolution_days)
+
+    # ------------------------------------------------------------------
+    # Graph metrics - what's honestly computable on the current single-hop
+    # model. True centrality (betweenness/closeness/PageRank) needs
+    # multi-hop traversal, which doesn't exist yet - deferred, not attempted
+    # here.
+    # ------------------------------------------------------------------
+
+    def degree(self, entity_id: str, on_date: str, weighted: bool = False) -> float:
+        """How many relationships touch `entity_id` (as subject or object)
+        on `on_date`. `weighted=True` sums confidence (None treated as 0.0)
+        instead of counting. Deduplicated by relationship_id so a self-loop
+        (entity_id as both subject and object of the same relationship)
+        isn't counted twice."""
+        subject_side = self.as_of((entity_id, None, None), on_date)
+        object_side = self.as_of((None, None, entity_id), on_date)
+        by_relationship = {v.relationship_id: v for v in subject_side + object_side}
+        if weighted:
+            return sum(v.confidence or 0.0 for v in by_relationship.values())
+        return float(len(by_relationship))
+
+    def edge_weight(self, subject: str, predicate: str, object_id: str, on_date: str) -> float | None:
+        """The confidence of one specific relationship on `on_date`, or None
+        if it isn't open (or has no confidence set) then."""
+        matches = self.as_of((subject, predicate, object_id), on_date)
+        return matches[0].confidence if matches else None
+
+    def track(self, metric: str, target, start: str, end: str, resolution_days: int = 1) -> GraphSignal:
+        """Evaluate a graph metric at each `resolution_days` step across
+        [start, end], returning a GraphSignal - a plain time series, eager
+        (not lazy like GraphSeries) since a signal is a small point list
+        meant to be joined/plotted immediately."""
+        if metric == "degree":
+            fn = lambda d: self.degree(target, d)
+        elif metric == "weighted_degree":
+            fn = lambda d: self.degree(target, d, weighted=True)
+        elif metric == "edge_weight":
+            subject, predicate, object_id = target
+            fn = lambda d: self.edge_weight(subject, predicate, object_id, d)
+        else:
+            raise ValidationError(
+                f"unknown metric {metric!r} - expected 'degree', 'weighted_degree', or 'edge_weight'"
+            )
+        points = [(d, fn(d)) for d in date_range(start, end, resolution_days)]
+        return GraphSignal(metric=metric, target=target, points=points)
 
     def get_entity(self, entity_id: str) -> Entity | None:
         with self._store.txn() as t:

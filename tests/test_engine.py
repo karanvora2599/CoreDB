@@ -1,3 +1,8 @@
+import pytest
+
+import coredb
+
+
 def test_assert_fact_opens_interval(db):
     vid = db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.9)
     facts = db.as_of(("NVIDIA", "SUPPLIED_BY", "TSMC"), "2026-01-01")
@@ -244,3 +249,50 @@ def test_graph_series_resolution_days(db):
     db.sync_snapshot("NVIDIA", "CO_OCCURS_WITH", {"AI": 1}, "2026-01-01")
     gs = db.series(("NVIDIA", "CO_OCCURS_WITH", None), "2026-01-01", "2026-01-10", resolution_days=5)
     assert list(gs.dates()) == ["2026-01-01", "2026-01-06"]
+
+
+def test_degree_counts_subject_and_object_side_without_double_counting(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
+    db.assert_fact("NVIDIA", "PARTNER_OF", "Microsoft", "2026-01-01")
+    db.assert_fact("AMD", "SUPPLIED_BY", "TSMC", "2026-01-01")
+
+    assert db.degree("NVIDIA", "2026-01-05") == 2.0   # both edges touch NVIDIA as subject
+    assert db.degree("TSMC", "2026-01-05") == 2.0      # TSMC is the object of two edges
+
+    # A self-loop (entity as both subject and object of one relationship)
+    # must not be double-counted.
+    db.assert_fact("Self", "SELF_REL", "Self", "2026-01-01")
+    assert db.degree("Self", "2026-01-05") == 1.0
+
+
+def test_weighted_degree_sums_confidence_treating_none_as_zero(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.9)
+    db.assert_fact("NVIDIA", "PARTNER_OF", "Microsoft", "2026-01-01")  # no confidence -> 0.0
+    assert db.degree("NVIDIA", "2026-01-05", weighted=True) == 0.9
+
+
+def test_edge_weight_returns_none_when_not_open(db):
+    assert db.edge_weight("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01") is None
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.75)
+    assert db.edge_weight("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-05") == 0.75
+    db.retract_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-10")
+    assert db.edge_weight("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-15") is None
+
+
+def test_track_degree_and_edge_weight_point_sequences(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.5)
+    db.assert_fact("NVIDIA", "PARTNER_OF", "Microsoft", "2026-01-03")
+
+    degree_signal = db.track("degree", "NVIDIA", "2026-01-01", "2026-01-05")
+    assert degree_signal.points == [
+        ("2026-01-01", 1.0), ("2026-01-02", 1.0), ("2026-01-03", 2.0),
+        ("2026-01-04", 2.0), ("2026-01-05", 2.0),
+    ]
+
+    weight_signal = db.track("edge_weight", ("NVIDIA", "SUPPLIED_BY", "TSMC"), "2026-01-01", "2026-01-03")
+    assert weight_signal.points == [("2026-01-01", 0.5), ("2026-01-02", 0.5), ("2026-01-03", 0.5)]
+
+
+def test_track_rejects_unknown_metric(db):
+    with pytest.raises(coredb.ValidationError):
+        db.track("betweenness", "NVIDIA", "2026-01-01", "2026-01-05")
