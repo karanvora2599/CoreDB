@@ -4,6 +4,8 @@ TGQL is CoreDB's query language: a small, purpose-built grammar for querying and
 
 Run TGQL with `Database.execute(source: str)`. Every statement operates on a **pattern**: a `(subject, predicate, object)` triple where any position is a literal identifier or a `?name` wildcard captured as a variable binding in results.
 
+Malformed source text (a syntax error, or an unsupported `RESOLUTION` unit) raises `coredb.QueryError`; write statements with an invalid triple (`ASSERT`/`RETRACT` with a `?` wildcard, or values that would fail `assert_fact`/`retract_fact`'s own validation) raise `coredb.ValidationError`.
+
 ```
 (SUBJECT, PREDICATE, OBJECT)     # all bound
 (NVIDIA, ?p, ?o)                 # subject bound, rest captured

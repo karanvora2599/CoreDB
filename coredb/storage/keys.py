@@ -55,6 +55,14 @@ def triple_key(subject: str, predicate: str, object_id: str) -> bytes:
     return _enc(subject, predicate, object_id)
 
 
+def open_by_sp_key(subject: str, predicate: str, relationship_id: int) -> bytes:
+    return _enc(subject, predicate) + _SEP + encode_id(relationship_id)
+
+
+def open_by_sp_prefix(subject: str, predicate: str) -> bytes:
+    return _enc(subject, predicate) + _SEP
+
+
 def decode_triple_key(raw: bytes) -> tuple[str, str, str]:
     subject, predicate, object_id = raw.split(_SEP)
     return subject.decode("utf-8"), predicate.decode("utf-8"), object_id.decode("utf-8")

@@ -84,9 +84,13 @@ def execute(db, ast) -> list[dict] | dict:
         }
 
     if isinstance(ast, RangeQuery):
-        pattern_vals = _pattern_values(ast.pattern)
-        day_counts = db.range_agg(pattern_vals, ast.start, ast.end)
-        return [{"object_id": obj, "dayCount": count} for obj, count in day_counts.items()]
+        subject, predicate, obj = _pattern_values(ast.pattern)
+        day_counts = db.range_agg((subject, predicate, obj), ast.start, ast.end)
+        # Mirror engine.range_agg's own key_field choice: aggregated by
+        # subject_id for a reverse pattern (object bound, subject wildcard),
+        # object_id otherwise - see that method's docstring for why.
+        key_label = "subject_id" if subject is None and obj is not None else "object_id"
+        return [{key_label: k, "dayCount": count} for k, count in day_counts.items()]
 
     if isinstance(ast, SeriesQuery):
         pattern_vals = _pattern_values(ast.pattern)

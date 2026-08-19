@@ -115,6 +115,32 @@ def test_range_agg_sums_disjoint_intervals(db):
     assert counts["AI"] == 4  # (01-01..01-02) + (01-05..01-06) = 2 + 2
 
 
+def test_range_agg_aggregates_by_subject_for_a_reverse_pattern(db):
+    # With the object bound and the subject wildcarded, every candidate
+    # shares the same object_id - aggregating by object_id would collapse
+    # NVIDIA's and AMD's day counts into one meaningless bucket instead of
+    # keeping them separate by subject.
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
+    db.retract_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-05")
+    db.assert_fact("AMD", "SUPPLIED_BY", "TSMC", "2026-01-01")
+
+    counts = db.range_agg((None, "SUPPLIED_BY", "TSMC"), "2026-01-01", "2026-01-10")
+    assert counts == {"NVIDIA": 5, "AMD": 10}
+
+
+def test_sync_snapshot_finds_currently_open_via_open_by_sp_idx(db):
+    # Regression for the old O(all-history) _open_objects_for scan: after
+    # several open/close cycles for unrelated objects, a fresh sync_snapshot
+    # call must still resolve exactly the currently-open set.
+    db.sync_snapshot("X", "REL", {"A": 1, "B": 1}, "2026-01-01")
+    db.sync_snapshot("X", "REL", {"A": 1}, "2026-01-03")          # B closes
+    result = db.sync_snapshot("X", "REL", {"A": 1, "C": 1}, "2026-01-05")  # C opens
+    assert result["opened"] and not result["closed"]
+
+    open_now = db.as_of(("X", "REL", None), "2026-01-05")
+    assert sorted(v.object_id for v in open_now) == ["A", "C"]
+
+
 def _set_version_times(db, version_id, system_from=None, system_to=None):
     # Real datetime.now() calls a few lines apart can land on the same tick
     # at this clock's resolution, which would make these tests flaky - drive

@@ -4,6 +4,7 @@ without touching graph/temporal logic.
 """
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from typing import Iterator
 
 
 class Transaction(ABC):
@@ -19,7 +20,7 @@ class Transaction(ABC):
     def delete(self, table: str, key: bytes) -> None: ...
 
     @abstractmethod
-    def range_iter(self, table: str, start: bytes, end: bytes):
+    def range_iter(self, table: str, start: bytes, end: bytes) -> Iterator[tuple[bytes, bytes]]:
         """Yield (key, value) pairs for start <= key < end, in key order."""
         ...
 

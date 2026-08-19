@@ -3,7 +3,7 @@ import builtins
 import json
 
 from .engine import Database
-from .errors import CoreDBError, SchemaVersionError, StorageError, ValidationError
+from .errors import CoreDBError, QueryError, SchemaVersionError, StorageError, ValidationError
 from .model import Assertion, Entity, Relationship, RelationshipVersion
 from .series import GraphDelta, GraphSeries
 from .storage.lmdb_backend import LMDBStore
@@ -43,5 +43,5 @@ __all__ = [
     "open", "restore", "Database",
     "Entity", "Relationship", "RelationshipVersion", "Assertion",
     "GraphSeries", "GraphDelta",
-    "CoreDBError", "ValidationError", "StorageError", "SchemaVersionError",
+    "CoreDBError", "ValidationError", "StorageError", "SchemaVersionError", "QueryError",
 ]

@@ -2,10 +2,10 @@
 
 One LMDB environment holds several named sub-databases (dbi's), one per
 logical table: relationships, relationship_lookup, versions, spo_idx,
-ops_idx, open_idx, opened_time_idx, closed_time_idx, assertions,
-assertions_by_version, entities, sources, counters. LMDB's memory-mapped
-B+tree gives cheap sorted range iteration for free, which is exactly what
-the temporal indexes need.
+ops_idx, open_idx, open_by_sp_idx, opened_time_idx, closed_time_idx,
+assertions, assertions_by_version, entities, sources, counters. LMDB's
+memory-mapped B+tree gives cheap sorted range iteration for free, which is
+exactly what the temporal indexes need.
 """
 import os
 import struct
@@ -27,6 +27,7 @@ TABLES = [
     "spo_idx",
     "ops_idx",
     "open_idx",
+    "open_by_sp_idx",
     "opened_time_idx",
     "closed_time_idx",
     "assertions",

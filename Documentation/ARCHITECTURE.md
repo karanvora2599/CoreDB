@@ -6,7 +6,7 @@
 coredb/
 ├── __init__.py            # public API: coredb.open(path) -> Database
 ├── model.py                # Entity, Relationship, RelationshipVersion, Assertion, Source
-├── errors.py                # CoreDBError, ValidationError, StorageError, SchemaVersionError
+├── errors.py                # CoreDBError, ValidationError, StorageError, SchemaVersionError, QueryError
 ├── engine.py                # Database: mutation + query + storage-management methods
 ├── series.py                # GraphSeries (lazy interval view), GraphDelta (structured diff)
 ├── storage/
@@ -43,6 +43,7 @@ One LMDB environment, one sub-database (dbi) per logical table:
 | `spo_idx` | `subject\0predicate\0valid_from\0version_id` → `version_id` | `MATCH`/`HISTORY` with a bound subject: `(NVIDIA, ?p, ?o)` |
 | `ops_idx` | `object\0predicate\0subject\0valid_from\0version_id` → `version_id` | Reverse pattern lookups: `(?s, p, TSMC)` |
 | `open_idx` | `relationship_id` → `version_id` | Fast "is this triple currently open" check, used by `assert_fact`/`retract_fact`/`sync_snapshot` |
+| `open_by_sp_idx` | `subject\0predicate\0relationship_id` → `version_id` | `sync_snapshot`'s "what's currently open for this pair" scan — O(number open), not O(all history ever seen) |
 | `opened_time_idx` | `valid_from\0version_id` → `version_id` | Global (pattern-less) `DIFF`'s "opened" scan |
 | `closed_time_idx` | `valid_to\0version_id` → `version_id` | Global `DIFF`'s "closed" scan |
 | `assertions` | `assertion_id` → `Assertion` JSON | Evidence records backing a version |

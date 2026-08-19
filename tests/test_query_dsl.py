@@ -90,6 +90,16 @@ def test_parse_ignores_line_comments():
     assert ast.on_date == "2026-01-01"
 
 
+def test_parse_raises_query_error_on_malformed_syntax():
+    with pytest.raises(coredb.QueryError):
+        parse("NOT VALID TGQL AT ALL")
+
+
+def test_parse_raises_query_error_on_unsupported_resolution_unit():
+    with pytest.raises(coredb.QueryError):
+        parse("SERIES (X, REL, ?o) BETWEEN '2026-01-01' AND '2026-01-10' RESOLUTION '5w'")
+
+
 def test_executor_match_matches_direct_engine_call(db):
     db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
     direct = db.as_of(("NVIDIA", "SUPPLIED_BY", None), "2026-01-05")
@@ -130,6 +140,15 @@ def test_executor_range_matches_direct_engine_call(db):
     direct = db.range_agg(("NVIDIA", "CO_OCCURS_WITH", None), "2026-01-01", "2026-01-03")
     rows = db.execute("RANGE (NVIDIA, CO_OCCURS_WITH, ?o) BETWEEN '2026-01-01' AND '2026-01-03'")
     assert {r["object_id"]: r["dayCount"] for r in rows} == direct
+
+
+def test_executor_range_labels_reverse_pattern_by_subject(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
+    db.assert_fact("AMD", "SUPPLIED_BY", "TSMC", "2026-01-01")
+
+    rows = db.execute("RANGE (?s, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-01-05'")
+    assert all("subject_id" in r and "object_id" not in r for r in rows)
+    assert {r["subject_id"] for r in rows} == {"NVIDIA", "AMD"}
 
 
 def test_executor_series_matches_direct_engine_call(db):

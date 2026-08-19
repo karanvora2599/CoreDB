@@ -156,6 +156,7 @@ class Database:
         )
         self._store_version(t, version)
         t.put("open_idx", K.encode_id(rel_id), K.encode_id(vid))
+        t.put("open_by_sp_idx", K.open_by_sp_key(subject, predicate, rel_id), K.encode_id(vid))
         t.put("spo_idx", K.spo_key(subject, predicate, valid_from, vid), K.encode_id(vid))
         t.put("ops_idx", K.ops_key(obj, predicate, subject, valid_from, vid), K.encode_id(vid))
         t.put("opened_time_idx", K.time_key(valid_from, vid), K.encode_id(vid))
@@ -269,6 +270,7 @@ class Database:
             version.system_to = now_iso
             self._store_version(t, version)
             t.delete("open_idx", K.encode_id(rel_id))
+            t.delete("open_by_sp_idx", K.open_by_sp_key(subject, predicate, rel_id))
             t.put("closed_time_idx", K.time_key(valid_to, vid), K.encode_id(vid))
             return vid
 
@@ -322,6 +324,7 @@ class Database:
                 if obj not in objects_now_true:
                     version = self._load_version(t, vid)
                     t.delete("open_idx", K.encode_id(rel_id))
+                    t.delete("open_by_sp_idx", K.open_by_sp_key(subject, predicate, rel_id))
                     t.put("closed_time_idx", K.time_key(version.last_confirmed, vid), K.encode_id(vid))
                     version.valid_to = version.last_confirmed
                     version.system_to = now_iso
@@ -332,22 +335,15 @@ class Database:
 
     def _open_objects_for(self, t, subject: str, predicate: str) -> dict:
         """object_id -> (relationship_id, version_id) for every currently-open
-        version under (subject, predicate) - scans spo_idx's open intervals
-        via the relationships they belong to. Used by sync_snapshot to find
-        objects that need closing."""
+        version under (subject, predicate), via open_by_sp_idx - O(number
+        currently open), not O(all history ever seen for this pair). Used by
+        sync_snapshot to find objects that need closing."""
         result = {}
-        prefix = K.spo_prefix(subject, predicate)
-        seen_relationships = set()
-        for _, val in t.range_iter("spo_idx", prefix, K.prefix_upper_bound(prefix)):
-            version = self._load_version(t, K.decode_id(val))
-            if version.relationship_id in seen_relationships:
-                continue
-            seen_relationships.add(version.relationship_id)
-            open_raw = t.get("open_idx", K.encode_id(version.relationship_id))
-            if open_raw:
-                open_vid = K.decode_id(open_raw)
-                open_version = self._load_version(t, open_vid) if open_vid != version.version_id else version
-                result[open_version.object_id] = (version.relationship_id, open_vid)
+        prefix = K.open_by_sp_prefix(subject, predicate)
+        for _, val in t.range_iter("open_by_sp_idx", prefix, K.prefix_upper_bound(prefix)):
+            vid = K.decode_id(val)
+            version = self._load_version(t, vid)
+            result[version.object_id] = (version.relationship_id, vid)
         return result
 
     # ------------------------------------------------------------------
@@ -419,20 +415,26 @@ class Database:
 
     def range_agg(self, pattern: tuple, start: str, end: str) -> dict[str, int]:
         """Day-count of each matching version's overlap with [start, end]
-        (inclusive), aggregated by object_id. Intended for patterns with a
-        bound subject (aggregate over objects); an entity can have several
-        disjoint intervals in the window, whose day counts are summed."""
+        (inclusive), aggregated by whichever side of the pattern is a
+        wildcard - object_id when the subject is bound (or neither side is),
+        subject_id for a reverse pattern (object bound, subject wildcard).
+        Aggregating by object_id unconditionally would be meaningless for a
+        reverse pattern, since every candidate shares the same object_id.
+        An entity can have several disjoint intervals in the window, whose
+        day counts are summed."""
         subject, predicate, obj = pattern
         with self._store.txn() as t:
             candidates = [v for v in self._scan_candidates(t, subject, predicate, obj)
                           if v.valid_from <= end and (v.valid_to is None or v.valid_to >= start)]
         start_dt, end_dt = _parse_date(start), _parse_date(end)
+        key_field = "subject_id" if subject is None and obj is not None else "object_id"
         day_counts: dict[str, int] = {}
         for v in candidates:
             overlap_from = max(start_dt, _parse_date(v.valid_from))
             overlap_to = min(end_dt, _parse_date(v.valid_to) if v.valid_to else end_dt)
             days = max(0, (overlap_to - overlap_from).days + 1)
-            day_counts[v.object_id] = day_counts.get(v.object_id, 0) + days
+            key = getattr(v, key_field)
+            day_counts[key] = day_counts.get(key, 0) + days
         return day_counts
 
     def as_known(self, pattern: tuple, on_date: str, knowledge_cutoff: str) -> list[RelationshipVersion]:

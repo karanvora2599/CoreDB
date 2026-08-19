@@ -4,7 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from lark import Lark, Transformer
+from lark.exceptions import LarkError, VisitError
 
+from ..errors import CoreDBError, QueryError
 from .ast_nodes import (
     AssertStatement, DiffQuery, HistoryQuery, MatchQuery, RangeQuery,
     RetractStatement, SeriesQuery, Term, WhereClause,
@@ -21,7 +23,7 @@ def _parse_resolution(token) -> int:
     """'7d' -> 7. Only day resolutions are supported for now."""
     text = _unquote(token)
     if not text.endswith("d"):
-        raise ValueError(f"unsupported RESOLUTION unit: {text!r} (only '<N>d' is supported)")
+        raise QueryError(f"unsupported RESOLUTION unit: {text!r} (only '<N>d' is supported)")
     return int(text[:-1])
 
 
@@ -114,5 +116,16 @@ _builder = _ASTBuilder()
 
 
 def parse(source: str):
-    tree = _parser.parse(source)
-    return _builder.transform(tree)
+    """Parse TGQL source into an ast_nodes value, or raise QueryError for
+    malformed syntax (re-raising CoreDBError subclasses - e.g. a QueryError
+    from _parse_resolution, or a ValidationError from a later validation
+    step - unwrapped, since those are already the right exception type)."""
+    try:
+        tree = _parser.parse(source)
+        return _builder.transform(tree)
+    except VisitError as e:
+        if isinstance(e.orig_exc, CoreDBError):
+            raise e.orig_exc
+        raise QueryError(f"invalid TGQL query: {e.orig_exc}") from e
+    except LarkError as e:
+        raise QueryError(f"invalid TGQL syntax: {e}") from e
