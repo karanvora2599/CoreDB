@@ -134,16 +134,52 @@ An unknown metric name or wrong argument count raises `coredb.QueryError`.
 
 Joining a signal against external (non-graph) data — e.g. correlating `DEGREE` against a price series — is Python-API-only in v0.3: `db.track(...)` returns a `GraphSignal`, and `GraphSignal.join(other: dict)` does an inner join on date. This isn't expressible in TGQL's string syntax since it needs caller-supplied data, the same reason `ASSERT ... SOURCE` stays Python-only.
 
+## TGQL v0.4 (point-to-point path queries)
+
+These trace a path between two **explicitly named entities** via breadth-first search over edges active at a date, bounded by `MAX_DEPTH` hops (default `4`, must be in `[1, 10]`). This is **not** general multi-hop pattern matching inside `MATCH`/`HISTORY` (see "Not yet supported") — `A`/`B` here are always concrete entities, never `?` wildcards, and there's no way to match an arbitrary-length chain as part of a larger pattern.
+
+### `PATH (A, B) AS OF '<date>' [MAX_DEPTH <n>]`
+
+Whether `A` and `B` are connected on a given date, and the shortest path if so.
+
+```
+PATH (NVIDIA, OpenAI) AS OF '2026-01-05'
+PATH (NVIDIA, OpenAI) AS OF '2026-01-05' MAX_DEPTH 2
+```
+
+**Result:** `{"connected": bool, "path": [<version dict>, ...] | None}`.
+
+### `FIRST_CONNECTED (A, B) [BETWEEN '<date>' AND '<date>'] [MAX_DEPTH <n>]`
+
+The earliest date `A` and `B` become connected. Scans chronologically through every date some relationship opened (bounded by `BETWEEN` if given) — connectivity isn't monotonic (edges can close again), so this can't be a binary search.
+
+```
+FIRST_CONNECTED (NVIDIA, OpenAI)
+FIRST_CONNECTED (NVIDIA, OpenAI) BETWEEN '2024-01-01' AND '2025-01-01' MAX_DEPTH 3
+```
+
+**Result:** `{"first_connected": <date> | None}`.
+
+### `PATH_HISTORY (A, B) BETWEEN '<date>' AND '<date>' [RESOLUTION '<N>d'] [MAX_DEPTH <n>]`
+
+`PATH` stepped across an interval — how the path between two entities emerges, changes, or disappears over time.
+
+```
+PATH_HISTORY (NVIDIA, OpenAI) BETWEEN '2024-01-01' AND '2025-01-01' RESOLUTION '30d'
+```
+
+**Result:** `list[dict]` — `[{"date": ..., "path": [<version dict>, ...] | None}, ...]`.
+
 ## Not yet supported
 
 These are deliberately out of scope so far — see `Documentation/ROADMAP.md` for the fuller picture of what's deferred and why:
 
-- Multi-hop patterns (`(a)-[]->(b)-[]->(c)` chains) — every statement is single-hop.
-- **Centrality-family metrics** (betweenness, closeness, PageRank) for `TRACK` — these need multi-hop graph traversal to mean anything; only `DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT` are honestly computable without it.
-- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, or `TRACK` — their result shapes (a single delta object, an aggregate list, a stepped series/signal) don't map onto a single-field row filter as cleanly as `MATCH`/`HISTORY`'s flat version lists do.
+- **General multi-hop pattern matching** inside `MATCH`/`HISTORY` (`(a)-[]->(b)-[]->(c)` chains with wildcards at each hop) — v0.4's `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY` are point-to-point queries between two named entities, not a path-pattern grammar.
+- **Centrality-family metrics** (betweenness, closeness, PageRank) for `TRACK` — v0.4 adds the BFS traversal primitive these need, but the metrics themselves (which typically require many-source or all-pairs traversal, not single-path BFS) aren't implemented yet.
+- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, `TRACK`, `PATH`, `FIRST_CONNECTED`, or `PATH_HISTORY` — only `MATCH`/`HISTORY` support them.
 - `WHERE` on any field other than `confidence` — no query planner support yet for filtering on `properties` or other fields.
 - `ASSERT ... SOURCE '<url>'` — attaching provenance from the DSL. Sources are still Python-API-only (`sources=[...]` on `assert_fact`/`sync_snapshot`).
-- `GraphSignal.join()` from TGQL — see above.
+- `GraphSignal.join()` from TGQL — see the `TRACK` section above.
 - `ORDER BY` — `HISTORY` is always chronological; there's no way to sort `MATCH` results yet.
 
 ## Version history
@@ -151,3 +187,4 @@ These are deliberately out of scope so far — see `Documentation/ROADMAP.md` fo
 - **v0.1** — `MATCH`/`HISTORY`/`DIFF`/`RANGE`/`SERIES`, read-only.
 - **v0.2** — `ASSERT`/`RETRACT` write statements, `WHERE`/`LIMIT` on `MATCH`/`HISTORY`, line comments.
 - **v0.3** — `TRACK` (`DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT`), turning a graph metric into a time series.
+- **v0.4** — `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`, point-to-point multi-hop traversal via bounded BFS.

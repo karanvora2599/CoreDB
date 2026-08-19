@@ -87,3 +87,30 @@ class TrackQuery:
     start: str
     end: str
     resolution_days: int = 1
+
+
+@dataclass
+class PathQuery:
+    a: str
+    b: str
+    on_date: str
+    max_depth: int = 4
+
+
+@dataclass
+class FirstConnectedQuery:
+    a: str
+    b: str
+    start: str | None = None
+    end: str | None = None
+    max_depth: int = 4
+
+
+@dataclass
+class PathHistoryQuery:
+    a: str
+    b: str
+    start: str
+    end: str
+    resolution_days: int = 1
+    max_depth: int = 4

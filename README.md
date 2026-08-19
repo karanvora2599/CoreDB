@@ -12,7 +12,8 @@ This project generalizes a pattern first proven in [`Knowledge_Graph`](../Knowle
 - **Milestone 2** (done): evidence-based data model (`Entity`/`Relationship`/`RelationshipVersion`/`Assertion`), `GraphSeries` (lazy interval view) and `GraphDelta` (structured diff datatype), TGQL `SERIES` statement.
 - **Milestone 3** (done): TGQL v0.2 (`ASSERT`/`RETRACT` write statements, `WHERE`/`LIMIT` filtering, comments), input validation + a `coredb/errors.py` exception hierarchy, storage management (`stats`/`backup`/`dump`/`restore`, schema versioning, clear errors on a full LMDB map).
 - **Milestone 4** (done): TGQL v0.3 (`TRACK`), turning a graph metric (`DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT`) into a `GraphSignal` time series joinable against external (non-graph) data.
-- See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deliberately deferred (centrality-family metrics, provenance queries, change-point detection, multi-hop traversal, a server mode).
+- **Milestone 5** (done): TGQL v0.4 (`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`), point-to-point multi-hop traversal between two named entities via bounded BFS.
+- "Full architecture" = completing the evolution algebra as an embedded library: M5 (done) unlocks the next three — centrality-family `TRACK` metrics, provenance/`WHY_CHANGED`, change-point detection. See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for that order and what's deferred outside this scope (general multi-hop pattern matching, streaming, a server mode).
 
 ## Install
 
@@ -56,6 +57,11 @@ db.execute("SERIES (NVIDIA, CO_OCCURS_WITH, ?o) BETWEEN '2026-01-01' AND '2026-0
 db.execute("TRACK DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
 signal = db.track("degree", "NVIDIA", "2026-01-01", "2026-01-10")
 signal.join({"2026-01-05": 134.2})   # inner join against e.g. price data, by date
+
+# Multi-hop traversal between two named entities.
+db.execute("PATH (NVIDIA, OpenAI) AS OF '2026-01-10'")
+db.execute("FIRST_CONNECTED (NVIDIA, OpenAI)")
+db.execute("PATH_HISTORY (NVIDIA, OpenAI) BETWEEN '2026-01-01' AND '2026-06-01' RESOLUTION '30d'")
 
 # Storage management.
 db.stats()               # entry counts per table

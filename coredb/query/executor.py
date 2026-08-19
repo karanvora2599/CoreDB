@@ -6,8 +6,9 @@ import operator
 
 from ..errors import ValidationError
 from .ast_nodes import (
-    AssertStatement, DiffQuery, HistoryQuery, MatchQuery, Pattern, RangeQuery,
-    RetractStatement, SeriesQuery, TrackQuery, WhereClause,
+    AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery,
+    PathHistoryQuery, PathQuery, Pattern, RangeQuery, RetractStatement,
+    SeriesQuery, TrackQuery, WhereClause,
 )
 
 _FIELD_BY_POSITION = ("subject_id", "predicate", "object_id")
@@ -110,5 +111,17 @@ def execute(db, ast) -> list[dict] | dict:
     if isinstance(ast, TrackQuery):
         signal = db.track(ast.metric, ast.target, ast.start, ast.end, ast.resolution_days)
         return [{"date": d, "value": v} for d, v in signal.points]
+
+    if isinstance(ast, PathQuery):
+        path = db.path_exists(ast.a, ast.b, ast.on_date, max_depth=ast.max_depth)
+        return {"connected": path is not None, "path": [v.to_dict() for v in path] if path is not None else None}
+
+    if isinstance(ast, FirstConnectedQuery):
+        date = db.first_connected(ast.a, ast.b, start=ast.start, end=ast.end, max_depth=ast.max_depth)
+        return {"first_connected": date}
+
+    if isinstance(ast, PathHistoryQuery):
+        return db.path_history(ast.a, ast.b, ast.start, ast.end,
+                                resolution_days=ast.resolution_days, max_depth=ast.max_depth)
 
     raise TypeError(f"unknown AST node: {ast!r}")

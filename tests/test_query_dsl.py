@@ -2,8 +2,8 @@ import pytest
 
 import coredb
 from coredb.query.ast_nodes import (
-    AssertStatement, DiffQuery, HistoryQuery, MatchQuery, RangeQuery, RetractStatement, SeriesQuery,
-    TrackQuery,
+    AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery, PathHistoryQuery,
+    PathQuery, RangeQuery, RetractStatement, SeriesQuery, TrackQuery,
 )
 from coredb.query.parser import parse
 
@@ -127,6 +127,41 @@ def test_parse_track_rejects_unknown_metric_and_wrong_arity():
         parse("TRACK DEGREE(NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-01-10'")
 
 
+def test_parse_path():
+    ast = parse("PATH (NVIDIA, OpenAI) AS OF '2026-01-01'")
+    assert isinstance(ast, PathQuery)
+    assert ast.a == "NVIDIA" and ast.b == "OpenAI"
+    assert ast.on_date == "2026-01-01"
+    assert ast.max_depth == 4
+
+    ast2 = parse("PATH (NVIDIA, OpenAI) AS OF '2026-01-01' MAX_DEPTH 2")
+    assert ast2.max_depth == 2
+
+
+def test_parse_first_connected():
+    ast = parse("FIRST_CONNECTED (NVIDIA, OpenAI)")
+    assert isinstance(ast, FirstConnectedQuery)
+    assert ast.start is None and ast.end is None
+    assert ast.max_depth == 4
+
+    ast2 = parse("FIRST_CONNECTED (NVIDIA, OpenAI) BETWEEN '2024-01-01' AND '2025-01-01' MAX_DEPTH 6")
+    assert ast2.start == "2024-01-01" and ast2.end == "2025-01-01"
+    assert ast2.max_depth == 6
+
+
+def test_parse_path_history():
+    ast = parse("PATH_HISTORY (NVIDIA, OpenAI) BETWEEN '2024-01-01' AND '2025-01-01'")
+    assert isinstance(ast, PathHistoryQuery)
+    assert ast.resolution_days == 1
+    assert ast.max_depth == 4
+
+    ast2 = parse(
+        "PATH_HISTORY (NVIDIA, OpenAI) BETWEEN '2024-01-01' AND '2025-01-01' RESOLUTION '30d' MAX_DEPTH 3"
+    )
+    assert ast2.resolution_days == 30
+    assert ast2.max_depth == 3
+
+
 def test_executor_match_matches_direct_engine_call(db):
     db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
     direct = db.as_of(("NVIDIA", "SUPPLIED_BY", None), "2026-01-05")
@@ -221,3 +256,33 @@ def test_executor_track_matches_direct_engine_call(db):
     direct = db.track("degree", "NVIDIA", "2026-01-01", "2026-01-03")
     rows = db.execute("TRACK DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-03'")
     assert [(r["date"], r["value"]) for r in rows] == direct.points
+
+
+def test_executor_path_matches_direct_engine_call(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-01-01")
+
+    result = db.execute("PATH (NVIDIA, Microsoft) AS OF '2024-06-01'")
+    assert result["connected"] is True
+    assert [h["object_id"] for h in result["path"]] == ["CoreWeave", "Microsoft"]
+
+    not_found = db.execute("PATH (NVIDIA, Nowhere) AS OF '2024-06-01'")
+    assert not_found == {"connected": False, "path": None}
+
+
+def test_executor_first_connected_matches_direct_engine_call(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-06-01")
+
+    direct = db.first_connected("NVIDIA", "Microsoft")
+    result = db.execute("FIRST_CONNECTED (NVIDIA, Microsoft)")
+    assert result == {"first_connected": direct} == {"first_connected": "2024-06-01"}
+
+
+def test_executor_path_history_matches_direct_engine_call(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-06-01")
+
+    direct = db.path_history("NVIDIA", "Microsoft", "2024-01-01", "2024-07-01", resolution_days=180)
+    rows = db.execute("PATH_HISTORY (NVIDIA, Microsoft) BETWEEN '2024-01-01' AND '2024-07-01' RESOLUTION '180d'")
+    assert rows == direct

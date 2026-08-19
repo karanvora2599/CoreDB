@@ -34,24 +34,37 @@ Between M3 and M4, a codebase audit found and fixed three real bugs (not a miles
 - **`Database.track(metric, target, start, end, resolution_days=1)`** — steps a metric across an interval into a `GraphSignal`.
 - **TGQL v0.3**: `TRACK <METRIC>(<args>) BETWEEN ... AND ... [RESOLUTION '<N>d']`, metric name is a plain identifier (not a grammar keyword) so future metrics only need a registry entry.
 
+## Milestone 5 — done
+
+Multi-hop traversal, scoped to point-to-point path queries between two named entities (not general multi-hop pattern matching inside `MATCH`/`HISTORY`, which stays deferred).
+
+- **`_neighbor_versions`** extracted from M4's `degree()` into a shared helper — every relationship touching one entity as of a date, deduplicated by `relationship_id`.
+- **`Database.path_exists(subject, object_id, on_date, max_depth=4)`** — bounded breadth-first search, returns the shortest path or `None`. `max_depth` validated into `[1, 10]`.
+- **`Database.first_connected(subject, object_id, start=None, end=None, max_depth=4)`** — earliest date two entities become connected, scanning `opened_time_idx`'s candidate dates chronologically (connectivity isn't monotonic, so no binary search).
+- **`Database.path_history(subject, object_id, start, end, resolution_days=1, max_depth=4)`** — `path_exists` stepped across an interval.
+- **TGQL v0.4**: `PATH (A, B) AS OF '<date>' [MAX_DEPTH <n>]`, `FIRST_CONNECTED (A, B) [BETWEEN ... AND ...] [MAX_DEPTH <n>]`, `PATH_HISTORY (A, B) BETWEEN ... AND ... [RESOLUTION '<N>d'] [MAX_DEPTH <n>]`.
+
+"The full architecture" (complete the evolution algebra, embedded-library scope) breaks into three more milestones from here, in this order — each depends on what's already built:
+
+1. **Centrality-family `TRACK` metrics** (betweenness, closeness, PageRank) — next, since M5's BFS primitive is the foundation they need.
+2. **Provenance / `WHY_CHANGED`** — independent of traversal; the data model already captures what's needed (`assertion_ids`, `source_id`, `event_time`/`published_at`/`ingested_at`), the query surface to walk that lineage isn't built yet.
+3. **Change-point detection** — a native `CHANGEPOINTS` operator over a `GraphSeries`/`GraphSignal`, instead of requiring a separate offline ML job.
+
 ## Explicitly deferred (not built yet)
 
-These come from a broader architectural vision shared during design discussion. They're real, well-motivated ideas — deferred for scoping reasons, not rejected:
+These come from a broader architectural vision shared during design discussion, but fall outside "complete the evolution algebra while staying an embedded library" — deferred for scoping reasons, not rejected:
 
-- **Centrality-family `TRACK` metrics** (betweenness, closeness, PageRank) — depend on multi-hop traversal (below); `DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT` (M4) are what's honestly computable without it.
-- **Provenance / `WHY_CHANGED`** — tracing a relationship's confidence change back through its `Assertion` records to the original sources. The data model already captures what's needed (`assertion_ids`, `source_id`, `event_time`/`published_at`/`ingested_at`); the query surface to walk that lineage isn't built.
-- **Change-point detection** — native `CHANGEPOINTS` operator over a `GraphSeries`/`GraphSignal` to surface structural or metric regime shifts, instead of requiring a separate offline ML job.
-- **Multi-hop traversal** — patterns are single-hop `(subject, predicate, object)` triples today, matching the star-topology scope of the original `Knowledge_Graph` app (generalized beyond its hardcoded hub, but not generalized to path queries like `(a)-[*1..2]-(b)`). Temporal path queries (`PATH HISTORY`, `FIRST_CONNECTED`, `PATH_STABILITY`) and centrality-family `TRACK` metrics both depend on this landing first.
+- **General multi-hop pattern matching** inside `MATCH`/`HISTORY` (`(a)-[*1..2]-(b)` chains with wildcards at each hop) — M5 added point-to-point traversal between two named entities, not a path-pattern grammar.
 - **Motif evolution** — tracking when a structural pattern (not just a single edge) emerges, dissolves, or recurs.
 - **Streaming / continuous queries** — `SUBSCRIBE TO CHANGES(...)` over live ingestion, unifying historical and future-facing queries in one model.
-- **Query optimizer** — right now every query method picks its own access path in Python (bound subject → `spo_idx`, bound object → `ops_idx`, neither → full scan). A real operator tree with cost-based planning (e.g. choosing between reconstructing two snapshots vs. a direct delta scan) is future work, not attempted yet.
-- **Server / wire protocol / PostgreSQL** — CoreDB stays an embedded library for now. A client-server mode (whether on top of LMDB or a different backend) is a deliberate non-goal until multi-process/multi-user access is actually needed.
+- **Query optimizer** — right now every query method picks its own access path in Python (bound subject → `spo_idx`, bound object → `ops_idx`, neither → full scan; BFS has no traversal-specific index either). A real operator tree with cost-based planning is future work, not attempted yet.
+- **Server / wire protocol / PostgreSQL** — CoreDB stays an embedded library. A client-server mode is a deliberate non-goal until multi-process/multi-user access is actually needed.
 - **Automatic map-size growth and multi-process write coordination** — `MapFullError` is caught and explained (M3), but growing the map automatically would require safely replaying an arbitrary caller-supplied transaction, which isn't generalizable; multi-process writers are untested.
-- **`WHERE` beyond `confidence`, and on `DIFF`/`RANGE`/`SERIES`/`TRACK`** — see `TGQL_SPEC.md`'s "Not yet supported" section.
+- **`WHERE` beyond `confidence`, and on `DIFF`/`RANGE`/`SERIES`/`TRACK`/`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`** — see `TGQL_SPEC.md`'s "Not yet supported" section.
 - **`ASSERT ... SOURCE '<url>'`** — provenance attachment from TGQL; sources remain Python-API-only for now.
 - **`GraphSignal.join()` from TGQL** — joining a `TRACK` signal against external data needs caller-supplied data, so it stays Python-API-only, same reasoning as `ASSERT ... SOURCE`.
-- **Benchmark suite** — a dedicated benchmark (`GraphTSBench`-style: `AS_OF`, bitemporal reconstruction, `HISTORY`, `DIFF`, `TRACK`, change-point, provenance, cross-modal joins) to measure latency/storage/reconstruction cost as the engine matures.
+- **Benchmark suite** — a dedicated benchmark (`GraphTSBench`-style: `AS_OF`, bitemporal reconstruction, `HISTORY`, `DIFF`, `TRACK`, `PATH`, change-point, provenance, cross-modal joins) to measure latency/storage/reconstruction cost as the engine matures.
 
 ## Known limitations to revisit as scale increases
 
-See `ARCHITECTURE.md`'s "Known limitations" section — predicate-only pattern scans, global `DIFF`'s persisted-set full scan, and single-hop-only patterns are the concrete things that would need indexing/design work before this handles a large graph.
+See `ARCHITECTURE.md`'s "Known limitations" section — predicate-only pattern scans, global `DIFF`'s persisted-set full scan, single-hop-only `MATCH`/`HISTORY` patterns, and unindexed BFS traversal cost are the concrete things that would need indexing/design work before this handles a large graph.

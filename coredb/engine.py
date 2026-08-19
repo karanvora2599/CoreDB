@@ -56,6 +56,16 @@ def _validate_date(name: str, value) -> None:
         raise ValidationError(f"{name} is not a valid 'YYYY-MM-DD' date: {value!r}") from e
 
 
+_MAX_DEPTH_CEILING = 10
+
+
+def _validate_max_depth(max_depth) -> None:
+    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or not (1 <= max_depth <= _MAX_DEPTH_CEILING):
+        raise ValidationError(
+            f"max_depth must be an integer in [1, {_MAX_DEPTH_CEILING}], got {max_depth!r}"
+        )
+
+
 class Database:
     def __init__(self, store: KVStore):
         self._store = store
@@ -463,18 +473,30 @@ class Database:
     # here.
     # ------------------------------------------------------------------
 
+    def _neighbor_versions(self, t, entity_id: str, on_date: str) -> list[RelationshipVersion]:
+        """Every relationship touching entity_id (as subject or object)
+        active on on_date, deduplicated by relationship_id so a self-loop
+        isn't returned twice. Takes an already-open transaction so callers
+        doing many of these (BFS) don't pay a fresh-transaction cost per
+        call."""
+        subject_side = [v for v in self._scan_candidates(t, entity_id, None, None)
+                         if v.valid_from <= on_date and (v.valid_to is None or v.valid_to >= on_date)]
+        object_side = [v for v in self._scan_candidates(t, None, None, entity_id)
+                        if v.valid_from <= on_date and (v.valid_to is None or v.valid_to >= on_date)]
+        by_relationship = {v.relationship_id: v for v in subject_side + object_side}
+        return list(by_relationship.values())
+
     def degree(self, entity_id: str, on_date: str, weighted: bool = False) -> float:
         """How many relationships touch `entity_id` (as subject or object)
         on `on_date`. `weighted=True` sums confidence (None treated as 0.0)
         instead of counting. Deduplicated by relationship_id so a self-loop
         (entity_id as both subject and object of the same relationship)
         isn't counted twice."""
-        subject_side = self.as_of((entity_id, None, None), on_date)
-        object_side = self.as_of((None, None, entity_id), on_date)
-        by_relationship = {v.relationship_id: v for v in subject_side + object_side}
+        with self._store.txn() as t:
+            neighbors = self._neighbor_versions(t, entity_id, on_date)
         if weighted:
-            return sum(v.confidence or 0.0 for v in by_relationship.values())
-        return float(len(by_relationship))
+            return sum(v.confidence or 0.0 for v in neighbors)
+        return float(len(neighbors))
 
     def edge_weight(self, subject: str, predicate: str, object_id: str, on_date: str) -> float | None:
         """The confidence of one specific relationship on `on_date`, or None
@@ -500,6 +522,94 @@ class Database:
             )
         points = [(d, fn(d)) for d in date_range(start, end, resolution_days)]
         return GraphSignal(metric=metric, target=target, points=points)
+
+    # ------------------------------------------------------------------
+    # Multi-hop traversal - point-to-point path queries between two named
+    # entities, via BFS over _neighbor_versions. Not general multi-hop
+    # pattern matching inside MATCH/HISTORY (still deferred) - see
+    # TGQL_SPEC.md.
+    # ------------------------------------------------------------------
+
+    def path_exists(self, subject: str, object_id: str, on_date: str,
+                     max_depth: int = 4) -> list[RelationshipVersion] | None:
+        """Shortest path from `subject` to `object_id` over edges active on
+        `on_date`, via breadth-first search bounded by `max_depth` hops.
+        Returns the path as an ordered list of RelationshipVersion (empty
+        list if subject == object_id), or None if unreachable within
+        max_depth."""
+        _validate_identifier("subject", subject)
+        _validate_identifier("object_id", object_id)
+        _validate_date("on_date", on_date)
+        _validate_max_depth(max_depth)
+        if subject == object_id:
+            return []
+        with self._store.txn() as t:
+            visited = {subject}
+            frontier = [(subject, [])]
+            for _ in range(max_depth):
+                next_frontier = []
+                for node, path in frontier:
+                    for v in self._neighbor_versions(t, node, on_date):
+                        other = v.object_id if v.subject_id == node else v.subject_id
+                        if other == object_id:
+                            return path + [v]
+                        if other not in visited:
+                            visited.add(other)
+                            next_frontier.append((other, path + [v]))
+                frontier = next_frontier
+                if not frontier:
+                    break
+        return None
+
+    def first_connected(self, subject: str, object_id: str, start: str | None = None,
+                         end: str | None = None, max_depth: int = 4) -> str | None:
+        """The earliest date within [start, end] (or all history if either
+        bound is omitted) at which `subject` and `object_id` become
+        connected within `max_depth` hops. Candidate dates are drawn from
+        opened_time_idx (every date some relationship opened) -
+        connectivity isn't monotonic (edges can also close), so this is a
+        chronological scan calling path_exists at each candidate, not a
+        binary search."""
+        _validate_identifier("subject", subject)
+        _validate_identifier("object_id", object_id)
+        if start is not None:
+            _validate_date("start", start)
+        if end is not None:
+            _validate_date("end", end)
+        _validate_max_depth(max_depth)
+        if subject == object_id:
+            # Trivially connected throughout the queried window - "first"
+            # is the window's own start, or undetermined without one.
+            return start
+
+        with self._store.txn() as t:
+            start_bytes = (start or "").encode()
+            end_bytes = end.encode() + b"\xff" if end is not None else b"\xff"
+            candidate_dates = sorted({
+                self._load_version(t, K.decode_id(val)).valid_from
+                for _, val in t.range_iter("opened_time_idx", start_bytes, end_bytes)
+            })
+
+        for d in candidate_dates:
+            if self.path_exists(subject, object_id, d, max_depth=max_depth) is not None:
+                return d
+        return None
+
+    def path_history(self, subject: str, object_id: str, start: str, end: str,
+                      resolution_days: int = 1, max_depth: int = 4) -> list[dict]:
+        """Steps through [start, end] at resolution_days, resolving
+        path_exists at each date - shows a path emerging, changing, or
+        disappearing over time. Returned as plain dicts (a path is
+        structured data, not a float, so GraphSignal's points shape doesn't
+        fit here)."""
+        points = []
+        for d in date_range(start, end, resolution_days):
+            path = self.path_exists(subject, object_id, d, max_depth=max_depth)
+            points.append({
+                "date": d,
+                "path": [v.to_dict() for v in path] if path is not None else None,
+            })
+        return points
 
     def get_entity(self, entity_id: str) -> Entity | None:
         with self._store.txn() as t:

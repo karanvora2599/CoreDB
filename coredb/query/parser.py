@@ -8,8 +8,9 @@ from lark.exceptions import LarkError, VisitError
 
 from ..errors import CoreDBError, QueryError
 from .ast_nodes import (
-    AssertStatement, DiffQuery, HistoryQuery, MatchQuery, RangeQuery,
-    RetractStatement, SeriesQuery, Term, TrackQuery, WhereClause,
+    AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery,
+    PathHistoryQuery, PathQuery, RangeQuery, RetractStatement, SeriesQuery,
+    Term, TrackQuery, WhereClause,
 )
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
@@ -46,6 +47,10 @@ class _ASTBuilder(Transformer):
         return WhereClause(field="confidence", comparator=str(comparator_tok), value=float(number_tok))
 
     def limit_clause(self, children):
+        (number_tok,) = children
+        return int(number_tok)
+
+    def max_depth_clause(self, children):
         (number_tok,) = children
         return int(number_tok)
 
@@ -128,6 +133,37 @@ class _ASTBuilder(Transformer):
         end = _unquote(strings[1])
         resolution_days = _parse_resolution(strings[2]) if len(strings) > 2 else 1
         return TrackQuery(metric=metric, target=target, start=start, end=end, resolution_days=resolution_days)
+
+    def path_stmt(self, children):
+        identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]
+        strings = [c for c in children if getattr(c, "type", None) == "STRING"]
+        max_depths = [c for c in children if isinstance(c, int)]
+        a, b = str(identifiers[0]), str(identifiers[1])
+        on_date = _unquote(strings[0])
+        max_depth = max_depths[0] if max_depths else 4
+        return PathQuery(a=a, b=b, on_date=on_date, max_depth=max_depth)
+
+    def first_connected_stmt(self, children):
+        identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]
+        strings = [c for c in children if getattr(c, "type", None) == "STRING"]
+        max_depths = [c for c in children if isinstance(c, int)]
+        a, b = str(identifiers[0]), str(identifiers[1])
+        start = _unquote(strings[0]) if len(strings) >= 1 else None
+        end = _unquote(strings[1]) if len(strings) >= 2 else None
+        max_depth = max_depths[0] if max_depths else 4
+        return FirstConnectedQuery(a=a, b=b, start=start, end=end, max_depth=max_depth)
+
+    def path_history_stmt(self, children):
+        identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]
+        strings = [c for c in children if getattr(c, "type", None) == "STRING"]
+        max_depths = [c for c in children if isinstance(c, int)]
+        a, b = str(identifiers[0]), str(identifiers[1])
+        start = _unquote(strings[0])
+        end = _unquote(strings[1])
+        resolution_days = _parse_resolution(strings[2]) if len(strings) > 2 else 1
+        max_depth = max_depths[0] if max_depths else 4
+        return PathHistoryQuery(a=a, b=b, start=start, end=end,
+                                 resolution_days=resolution_days, max_depth=max_depth)
 
     def statement(self, children):
         return children[0]

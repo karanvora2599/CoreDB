@@ -16,7 +16,7 @@ coredb/
 │   └── keys.py               # composite key encoding for LMDB's sorted byte-string keys
 └── query/
     ├── grammar.lark          # Lark grammar for TGQL (coredb/query language)
-    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery
+    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery, PathQuery, FirstConnectedQuery, PathHistoryQuery
     ├── parser.py              # Lark parse tree -> AST
     └── executor.py            # AST -> engine.py calls -> plain dict/list[dict] results
 ```
@@ -59,6 +59,12 @@ LMDB serializes write transactions within one process: a second `env.begin(write
 
 What's **not** covered: multiple *processes* writing to the same database (LMDB supports it at the storage level, but CoreDB hasn't been tested under it), and crash-mid-write recovery (LMDB's own durability guarantees apply, but CoreDB has no test coverage exercising an abrupt kill mid-transaction).
 
+## Traversal
+
+`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY` (TGQL v0.4) are answered by breadth-first search, not a new index: `_neighbor_versions(t, entity_id, on_date)` fetches every relationship touching one entity as of a date by combining `_scan_candidates` on both `spo_idx` (entity as subject) and `ops_idx` (entity as object), deduplicated by `relationship_id` — the same neighbor-fetch `degree()` (TGQL v0.3) already needed, now shared between both. `path_exists` runs standard level-by-level BFS from that primitive, bounded by `max_depth` (validated into `[1, 10]` — unbounded depth risks exponential frontier blowup with no cost limiting). `first_connected` reuses `opened_time_idx` (no new index) to get every candidate date some relationship opened, then scans chronologically calling `path_exists` — connectivity isn't monotonic (edges close too), so this can't be a binary search.
+
+Cost scales with branching factor (average degree) to the power of `max_depth`, with no traversal-specific index (like a precomputed reachability structure) yet — fine for the graphs this has been exercised on, a likely place to revisit if traversal becomes a bottleneck on a high-degree graph.
+
 ## Storage management
 
 - **Schema versioning.** `Database` writes a `schema_version` marker into the `counters` table on first open. If an existing database's marker doesn't match the running code's expected version, `Database()` raises `SchemaVersionError` immediately rather than silently operating on a mismatched on-disk shape. Recovery path: `Database.dump()` with the old code version, `coredb.restore()` with the new one.
@@ -71,5 +77,6 @@ What's **not** covered: multiple *processes* writing to the same database (LMDB 
 
 - **Patterns with neither subject nor object bound** (only a predicate, or nothing at all) fall back to a full scan of the `versions` table. Fine at the current scale; would need a predicate-only index for large graphs.
 - **Global (pattern-less) `DIFF`'s "persisted" set** is a full table scan — there's no interval index yet for "spans both dates" the way `opened_time_idx`/`closed_time_idx` cover the open/close cases.
-- **Single-hop patterns only.** `(subject, predicate, object)` triples, not multi-hop traversal (`(a)-[]->(b)-[]->(c)`). See `ROADMAP.md`.
+- **`MATCH`/`HISTORY` patterns are still single-hop only.** `(subject, predicate, object)` triples with no chain syntax — `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY` (above) added point-to-point traversal between two named entities, not general multi-hop *pattern matching*. See `ROADMAP.md`.
+- **No traversal-specific index.** BFS cost scales with branching factor × `max_depth`; see "Traversal" above.
 - **No automatic map-size growth or multi-process write coordination.** See "Concurrency" and "Storage management" above.

@@ -296,3 +296,80 @@ def test_track_degree_and_edge_weight_point_sequences(db):
 def test_track_rejects_unknown_metric(db):
     with pytest.raises(coredb.ValidationError):
         db.track("betweenness", "NVIDIA", "2026-01-01", "2026-01-05")
+
+
+def test_path_exists_direct_and_multi_hop(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-06-01")
+    db.assert_fact("Microsoft", "PARTNER_OF", "OpenAI", "2024-01-01")
+
+    # Not yet connected: the CoreWeave->Microsoft edge hasn't opened.
+    assert db.path_exists("NVIDIA", "OpenAI", "2024-03-01") is None
+
+    path = db.path_exists("NVIDIA", "OpenAI", "2024-07-01")
+    assert [(v.subject_id, v.object_id) for v in path] == [
+        ("NVIDIA", "CoreWeave"), ("CoreWeave", "Microsoft"), ("Microsoft", "OpenAI"),
+    ]
+
+    # A direct 1-hop path exists too.
+    assert [(v.subject_id, v.object_id) for v in db.path_exists("NVIDIA", "CoreWeave", "2024-07-01")] == [
+        ("NVIDIA", "CoreWeave"),
+    ]
+
+
+def test_path_exists_respects_max_depth(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-01-01")
+    db.assert_fact("Microsoft", "PARTNER_OF", "OpenAI", "2024-01-01")
+
+    assert db.path_exists("NVIDIA", "OpenAI", "2024-06-01", max_depth=2) is None
+    assert db.path_exists("NVIDIA", "OpenAI", "2024-06-01", max_depth=3) is not None
+
+
+def test_path_exists_finds_shortest_path(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-01-01")
+    db.assert_fact("Microsoft", "PARTNER_OF", "OpenAI", "2024-01-01")
+    # A direct 1-hop shortcut opens later.
+    db.assert_fact("NVIDIA", "PARTNER_OF", "Microsoft", "2025-01-01")
+
+    path = db.path_exists("NVIDIA", "OpenAI", "2025-02-01")
+    assert [(v.subject_id, v.object_id) for v in path] == [
+        ("NVIDIA", "Microsoft"), ("Microsoft", "OpenAI"),
+    ]
+
+
+def test_path_exists_trivial_for_same_entity(db):
+    assert db.path_exists("NVIDIA", "NVIDIA", "2024-01-01") == []
+
+
+def test_path_exists_rejects_max_depth_out_of_range(db):
+    with pytest.raises(coredb.ValidationError):
+        db.path_exists("A", "B", "2024-01-01", max_depth=0)
+    with pytest.raises(coredb.ValidationError):
+        db.path_exists("A", "B", "2024-01-01", max_depth=11)
+
+
+def test_first_connected_finds_earliest_date_the_path_becomes_possible(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("Microsoft", "PARTNER_OF", "OpenAI", "2024-01-01")
+    # The connecting edge opens well after either endpoint's own first edge.
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-06-01")
+
+    assert db.first_connected("NVIDIA", "OpenAI") == "2024-06-01"
+
+
+def test_first_connected_returns_none_when_never_connected(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    assert db.first_connected("NVIDIA", "OpenAI") is None
+
+
+def test_path_history_shows_path_emerging(db):
+    db.assert_fact("NVIDIA", "INVESTS_IN", "CoreWeave", "2024-01-01")
+    db.assert_fact("Microsoft", "PARTNER_OF", "OpenAI", "2024-01-01")
+    db.assert_fact("CoreWeave", "SUPPLIES", "Microsoft", "2024-06-01")
+
+    points = db.path_history("NVIDIA", "OpenAI", "2024-01-01", "2024-07-01", resolution_days=180)
+    assert [p["date"] for p in points] == ["2024-01-01", "2024-06-29"]
+    assert points[0]["path"] is None
+    assert len(points[1]["path"]) == 3

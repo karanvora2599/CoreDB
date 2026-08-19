@@ -19,6 +19,12 @@
 //   TRACK DEGREE(NVIDIA) BETWEEN 'd1' AND 'd2' [RESOLUTION '7d']
 //   TRACK WEIGHTED_DEGREE(NVIDIA) BETWEEN 'd1' AND 'd2'
 //   TRACK EDGE_WEIGHT(SUBJECT, PREDICATE, OBJECT) BETWEEN 'd1' AND 'd2'
+//
+// TGQL v0.4 additions - point-to-point path queries (not general multi-hop
+// pattern matching inside MATCH/HISTORY, which stays deferred):
+//   PATH (A, B) AS OF 'date' [MAX_DEPTH 4]
+//   FIRST_CONNECTED (A, B) [BETWEEN 'd1' AND 'd2'] [MAX_DEPTH 4]
+//   PATH_HISTORY (A, B) BETWEEN 'd1' AND 'd2' [RESOLUTION '7d'] [MAX_DEPTH 4]
 
 start: statement
 
@@ -30,6 +36,9 @@ statement: match_stmt
          | assert_stmt
          | retract_stmt
          | track_stmt
+         | path_stmt
+         | first_connected_stmt
+         | path_history_stmt
 
 match_stmt: "MATCH"i pattern "AS"i "OF"i STRING ("KNOWN"i "BY"i STRING)? where_clause? limit_clause?
 history_stmt: "HISTORY"i pattern ("BETWEEN"i STRING "AND"i STRING)? where_clause? limit_clause?
@@ -39,9 +48,13 @@ series_stmt: "SERIES"i pattern "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i ST
 assert_stmt: "ASSERT"i pattern "VALID"i "FROM"i STRING ("CONFIDENCE"i NUMBER)?
 retract_stmt: "RETRACT"i pattern "VALID"i "TO"i STRING
 track_stmt: "TRACK"i IDENTIFIER "(" IDENTIFIER ("," IDENTIFIER "," IDENTIFIER)? ")" "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i STRING)?
+path_stmt: "PATH"i "(" IDENTIFIER "," IDENTIFIER ")" "AS"i "OF"i STRING max_depth_clause?
+first_connected_stmt: "FIRST_CONNECTED"i "(" IDENTIFIER "," IDENTIFIER ")" ("BETWEEN"i STRING "AND"i STRING)? max_depth_clause?
+path_history_stmt: "PATH_HISTORY"i "(" IDENTIFIER "," IDENTIFIER ")" "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i STRING)? max_depth_clause?
 
 where_clause: "WHERE"i "confidence"i COMPARATOR NUMBER
 limit_clause: "LIMIT"i NUMBER
+max_depth_clause: "MAX_DEPTH"i NUMBER
 
 pattern: "(" term "," term "," term ")"
 term: VAR | IDENTIFIER
