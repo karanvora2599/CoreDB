@@ -110,29 +110,35 @@ MATCH (NVIDIA, ?p, ?o) AS OF '2026-01-01' WHERE confidence > 0.5 LIMIT 10
 
 ## TGQL v0.3 (graph metrics as time series)
 
-### `TRACK <METRIC>(<args>) BETWEEN '<date>' AND '<date>' [RESOLUTION '<N>d']`
+### `TRACK <METRIC>(<args>) BETWEEN '<date>' AND '<date>' [RESOLUTION '<N>d'] [MAX_DEPTH <n>]`
 
-Evaluates a graph metric at each resolution step across an interval, turning it into a plain time series (a `GraphSignal` under the hood — see `Database.track()`/`coredb/signal.py`). `<METRIC>` is a plain identifier (not a fixed grammar keyword), so future metrics only need a registry entry, not a grammar change.
-
-Supported metrics — what's honestly computable on the current single-hop model (see "Not yet supported" for what isn't):
+Evaluates a graph metric at each resolution step across an interval, turning it into a plain time series (a `GraphSignal` under the hood — see `Database.track()`/`coredb/signal.py`). `<METRIC>` is a plain identifier (not a fixed grammar keyword), so future metrics only need a registry entry, not a grammar change. `MAX_DEPTH` (default `4`, must be in `[1, 10]`) only affects `CLOSENESS`/`BETWEENNESS`; harmless (ignored) for the others.
 
 | Metric | Args | Meaning |
 |---|---|---|
 | `DEGREE(entity)` | 1 | Count of relationships touching `entity` (as subject or object), deduplicated by relationship |
 | `WEIGHTED_DEGREE(entity)` | 1 | Same, summing `confidence` instead of counting (`None` treated as `0.0`) |
 | `EDGE_WEIGHT(subject, predicate, object)` | 3 | The confidence of one specific relationship, or `null` when it isn't open |
+| `CLOSENESS(entity)` | 1 | **Harmonic** closeness centrality: `sum(1/distance)` to every node reachable within `MAX_DEPTH` hops. Not the classical `(n-1)/sum(distances)` formula, which is undefined/misleading on a graph that may be disconnected or depth-bounded — both always true here. See `Database.closeness()`'s docstring. |
+| `BETWEENNESS(entity)` | 1 | Brandes' betweenness centrality (unweighted, undirected), computed over every entity active on the date, each source's BFS bounded by `MAX_DEPTH`. A **global** computation — see below. |
+| `PAGERANK(entity)` | 1 | Standard power-iteration PageRank (damping `0.85`, directed out-edges). Also global; damping/iteration tuning is Python-API-only (`db.pagerank(...)`). |
 
 ```
 TRACK DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-31'
 TRACK WEIGHTED_DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-31' RESOLUTION '7d'
 TRACK EDGE_WEIGHT(NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-01-31'
+TRACK CLOSENESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-31'
+TRACK BETWEENNESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-31' MAX_DEPTH 3
+TRACK PAGERANK(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-31'
 ```
 
 An unknown metric name or wrong argument count raises `coredb.QueryError`.
 
 **Result:** `list[dict]` — `[{"date": ..., "value": ...}, ...]`.
 
-Joining a signal against external (non-graph) data — e.g. correlating `DEGREE` against a price series — is Python-API-only in v0.3: `db.track(...)` returns a `GraphSignal`, and `GraphSignal.join(other: dict)` does an inner join on date. This isn't expressible in TGQL's string syntax since it needs caller-supplied data, the same reason `ASSERT ... SOURCE` stays Python-only.
+**Cost note on `BETWEENNESS`/`PAGERANK`:** unlike `DEGREE`/`CLOSENESS` (single-entity queries), these process every active entity in the graph in one pass regardless of which entity you asked about — `Database.betweenness_all(on_date, ...)`/`pagerank_all(on_date, ...)` expose that full-graph result directly (not available via `TRACK`, which is per-entity by design); prefer those over looping `TRACK`/`betweenness()`/`pagerank()` per entity, since each call otherwise recomputes the whole graph. `TRACK`ing either across many resolution steps re-runs the full computation at every step — see `ARCHITECTURE.md`'s "Traversal" section.
+
+Joining a signal against external (non-graph) data — e.g. correlating `DEGREE` against a price series — is Python-API-only: `db.track(...)` returns a `GraphSignal`, and `GraphSignal.join(other: dict)` does an inner join on date. This isn't expressible in TGQL's string syntax since it needs caller-supplied data, the same reason `ASSERT ... SOURCE` stays Python-only.
 
 ## TGQL v0.4 (point-to-point path queries)
 
@@ -175,11 +181,11 @@ PATH_HISTORY (NVIDIA, OpenAI) BETWEEN '2024-01-01' AND '2025-01-01' RESOLUTION '
 These are deliberately out of scope so far — see `Documentation/ROADMAP.md` for the fuller picture of what's deferred and why:
 
 - **General multi-hop pattern matching** inside `MATCH`/`HISTORY` (`(a)-[]->(b)-[]->(c)` chains with wildcards at each hop) — v0.4's `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY` are point-to-point queries between two named entities, not a path-pattern grammar.
-- **Centrality-family metrics** (betweenness, closeness, PageRank) for `TRACK` — v0.4 adds the BFS traversal primitive these need, but the metrics themselves (which typically require many-source or all-pairs traversal, not single-path BFS) aren't implemented yet.
 - `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, `TRACK`, `PATH`, `FIRST_CONNECTED`, or `PATH_HISTORY` — only `MATCH`/`HISTORY` support them.
 - `WHERE` on any field other than `confidence` — no query planner support yet for filtering on `properties` or other fields.
 - `ASSERT ... SOURCE '<url>'` — attaching provenance from the DSL. Sources are still Python-API-only (`sources=[...]` on `assert_fact`/`sync_snapshot`).
 - `GraphSignal.join()` from TGQL — see the `TRACK` section above.
+- `betweenness_all()`/`pagerank_all()` from TGQL — `TRACK` is per-entity by design; the full-graph dict result doesn't fit its shape. Python-API-only for now.
 - `ORDER BY` — `HISTORY` is always chronological; there's no way to sort `MATCH` results yet.
 
 ## Version history
@@ -188,3 +194,4 @@ These are deliberately out of scope so far — see `Documentation/ROADMAP.md` fo
 - **v0.2** — `ASSERT`/`RETRACT` write statements, `WHERE`/`LIMIT` on `MATCH`/`HISTORY`, line comments.
 - **v0.3** — `TRACK` (`DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT`), turning a graph metric into a time series.
 - **v0.4** — `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`, point-to-point multi-hop traversal via bounded BFS.
+- **v0.5** — `TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK`, centrality metrics built on v0.4's traversal.

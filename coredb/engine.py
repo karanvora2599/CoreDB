@@ -16,6 +16,7 @@ DSL executor's job, not the engine's.
 from __future__ import annotations
 
 import json
+from collections import deque
 from datetime import date, datetime, timezone
 
 from .errors import SchemaVersionError, ValidationError
@@ -467,10 +468,10 @@ class Database:
         return GraphSeries(self, pattern, start, end, resolution_days)
 
     # ------------------------------------------------------------------
-    # Graph metrics - what's honestly computable on the current single-hop
-    # model. True centrality (betweenness/closeness/PageRank) needs
-    # multi-hop traversal, which doesn't exist yet - deferred, not attempted
-    # here.
+    # Graph metrics. degree/weighted_degree/edge_weight need only a single
+    # neighbor lookup; closeness/betweenness/pagerank (below, in the
+    # Centrality section) build on the BFS traversal primitives to answer
+    # what single-hop metrics can't.
     # ------------------------------------------------------------------
 
     def _neighbor_versions(self, t, entity_id: str, on_date: str) -> list[RelationshipVersion]:
@@ -485,6 +486,21 @@ class Database:
                         if v.valid_from <= on_date and (v.valid_to is None or v.valid_to >= on_date)]
         by_relationship = {v.relationship_id: v for v in subject_side + object_side}
         return list(by_relationship.values())
+
+    def _neighbor_node_ids(self, t, entity_id: str, on_date: str) -> set[str]:
+        """Distinct node ids adjacent to entity_id as of on_date - like
+        _neighbor_versions but deduplicated by the *other* node rather than
+        by relationship_id, so two entities connected by more than one
+        relationship (e.g. different predicates) count as a single graph
+        edge. This is what simple-graph algorithms (closeness/betweenness)
+        need; path_exists etc. use _neighbor_versions directly since they
+        need the actual RelationshipVersion for path reconstruction, and
+        their visited-set logic already handles multi-edges correctly
+        without this dedup."""
+        others = {v.object_id if v.subject_id == entity_id else v.subject_id
+                  for v in self._neighbor_versions(t, entity_id, on_date)}
+        others.discard(entity_id)
+        return others
 
     def degree(self, entity_id: str, on_date: str, weighted: bool = False) -> float:
         """How many relationships touch `entity_id` (as subject or object)
@@ -504,11 +520,14 @@ class Database:
         matches = self.as_of((subject, predicate, object_id), on_date)
         return matches[0].confidence if matches else None
 
-    def track(self, metric: str, target, start: str, end: str, resolution_days: int = 1) -> GraphSignal:
+    def track(self, metric: str, target, start: str, end: str, resolution_days: int = 1,
+              max_depth: int = 4) -> GraphSignal:
         """Evaluate a graph metric at each `resolution_days` step across
         [start, end], returning a GraphSignal - a plain time series, eager
         (not lazy like GraphSeries) since a signal is a small point list
-        meant to be joined/plotted immediately."""
+        meant to be joined/plotted immediately. `max_depth` only applies to
+        the BFS-bounded metrics (closeness/betweenness); harmless to pass
+        for the others."""
         if metric == "degree":
             fn = lambda d: self.degree(target, d)
         elif metric == "weighted_degree":
@@ -516,9 +535,16 @@ class Database:
         elif metric == "edge_weight":
             subject, predicate, object_id = target
             fn = lambda d: self.edge_weight(subject, predicate, object_id, d)
+        elif metric == "closeness":
+            fn = lambda d: self.closeness(target, d, max_depth=max_depth)
+        elif metric == "betweenness":
+            fn = lambda d: self.betweenness(target, d, max_depth=max_depth)
+        elif metric == "pagerank":
+            fn = lambda d: self.pagerank(target, d)
         else:
             raise ValidationError(
-                f"unknown metric {metric!r} - expected 'degree', 'weighted_degree', or 'edge_weight'"
+                f"unknown metric {metric!r} - expected one of 'degree', 'weighted_degree', "
+                "'edge_weight', 'closeness', 'betweenness', 'pagerank'"
             )
         points = [(d, fn(d)) for d in date_range(start, end, resolution_days)]
         return GraphSignal(metric=metric, target=target, points=points)
@@ -610,6 +636,170 @@ class Database:
                 "path": [v.to_dict() for v in path] if path is not None else None,
             })
         return points
+
+    # ------------------------------------------------------------------
+    # Centrality - built on the BFS primitives above. Closeness and
+    # betweenness are honest variants for a graph that may be disconnected
+    # and is always traversed with a bounded max_depth (see closeness()'s
+    # and betweenness_all()'s docstrings for exactly why). Betweenness and
+    # PageRank are global computations - they process every active entity
+    # in one pass regardless of which entity you actually care about.
+    # ------------------------------------------------------------------
+
+    def _active_entity_ids(self, t, on_date: str) -> set[str]:
+        """Every entity touching at least one relationship active on
+        on_date - the node set for the global algorithms below. No index
+        exists for "distinct entities as of a date", so this is a full
+        versions-table scan - the same documented limitation diff()'s
+        global branch already has, not a new one."""
+        ids = set()
+        for _, val in t.range_iter("versions", _VERSIONS_LOW, _VERSIONS_HIGH):
+            v = RelationshipVersion.from_dict(json.loads(val))
+            if v.valid_from <= on_date and (v.valid_to is None or v.valid_to >= on_date):
+                ids.add(v.subject_id)
+                ids.add(v.object_id)
+        return ids
+
+    def _bfs_distances(self, t, entity_id: str, on_date: str, max_depth: int) -> dict[str, int]:
+        """Every node reachable from entity_id within max_depth hops, as of
+        on_date, mapped to its shortest-path distance (entity_id itself is
+        not included - distance 0 to yourself isn't meaningful here)."""
+        distances = {}
+        seen = {entity_id}
+        frontier = {entity_id}
+        depth = 0
+        while frontier and depth < max_depth:
+            depth += 1
+            next_frontier = set()
+            for node in frontier:
+                for other in self._neighbor_node_ids(t, node, on_date):
+                    if other not in seen:
+                        seen.add(other)
+                        distances[other] = depth
+                        next_frontier.add(other)
+            frontier = next_frontier
+        return distances
+
+    def closeness(self, entity_id: str, on_date: str, max_depth: int = 4) -> float:
+        """Harmonic closeness centrality: sum(1/distance) over every node
+        reachable from entity_id within max_depth hops, as of on_date. Uses
+        the harmonic form rather than classical closeness
+        ((n-1)/sum(distances)) because classical closeness is undefined -
+        or misleadingly small - when the graph may be disconnected or
+        traversal is bounded by max_depth, both always true here. This is
+        the standard Marchiori & Latora variant for exactly this situation,
+        not an ad hoc substitute."""
+        _validate_identifier("entity_id", entity_id)
+        _validate_date("on_date", on_date)
+        _validate_max_depth(max_depth)
+        with self._store.txn() as t:
+            distances = self._bfs_distances(t, entity_id, on_date, max_depth)
+        return sum(1.0 / d for d in distances.values())
+
+    def betweenness_all(self, on_date: str, max_depth: int = 4) -> dict[str, float]:
+        """Brandes' betweenness centrality (unweighted, undirected -
+        consistent with how BFS treats relationships elsewhere in the
+        engine) over every entity active on on_date, with each source's BFS
+        bounded by max_depth. A global computation: this processes the
+        whole graph in one pass regardless of which entity you actually
+        care about - call this directly rather than betweenness() in a loop
+        if you need more than one entity's score, since betweenness() would
+        recompute the whole graph on every call."""
+        _validate_date("on_date", on_date)
+        _validate_max_depth(max_depth)
+        with self._store.txn() as t:
+            nodes = self._active_entity_ids(t, on_date)
+            betweenness = {v: 0.0 for v in nodes}
+            for s in nodes:
+                stack = []
+                predecessors = {v: [] for v in nodes}
+                sigma = {v: 0 for v in nodes}
+                sigma[s] = 1
+                dist = {v: -1 for v in nodes}
+                dist[s] = 0
+                queue = deque([s])
+                while queue:
+                    v = queue.popleft()
+                    stack.append(v)
+                    if dist[v] >= max_depth:
+                        continue
+                    for w in self._neighbor_node_ids(t, v, on_date):
+                        if dist[w] < 0:
+                            dist[w] = dist[v] + 1
+                            queue.append(w)
+                        if dist[w] == dist[v] + 1:
+                            sigma[w] += sigma[v]
+                            predecessors[w].append(v)
+                delta = {v: 0.0 for v in nodes}
+                while stack:
+                    w = stack.pop()
+                    for v in predecessors[w]:
+                        delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w])
+                    if w != s:
+                        betweenness[w] += delta[w]
+        # Each unordered pair's shortest path is counted from both ends -
+        # halve to correct the undirected double-count.
+        return {k: v / 2.0 for k, v in betweenness.items()}
+
+    def betweenness(self, entity_id: str, on_date: str, max_depth: int = 4) -> float:
+        """One entity's betweenness centrality. See betweenness_all()'s
+        docstring: this still computes the whole graph internally, so
+        prefer betweenness_all() directly if you need more than one
+        entity's score."""
+        _validate_identifier("entity_id", entity_id)
+        return self.betweenness_all(on_date, max_depth=max_depth).get(entity_id, 0.0)
+
+    def _out_neighbors(self, t, entity_id: str, on_date: str) -> list[str]:
+        """Distinct object_ids of relationships where entity_id is the
+        subject, active on on_date - the directed out-edges PageRank
+        follows (unlike closeness/betweenness, PageRank's link-following
+        semantics are inherently directional, not undirected)."""
+        objects = {v.object_id for v in self._scan_candidates(t, entity_id, None, None)
+                   if v.valid_from <= on_date and (v.valid_to is None or v.valid_to >= on_date)}
+        objects.discard(entity_id)
+        return list(objects)
+
+    def pagerank_all(self, on_date: str, damping: float = 0.85, max_iterations: int = 100,
+                      tol: float = 1e-6) -> dict[str, float]:
+        """Standard power-iteration PageRank over every entity active on
+        on_date, following directed out-edges (subject -> object). Dangling
+        nodes (no out-edges) redistribute their rank uniformly, standard
+        PageRank handling. A global computation like betweenness_all - call
+        this directly rather than pagerank() in a loop if you need more
+        than one entity's score."""
+        _validate_date("on_date", on_date)
+        with self._store.txn() as t:
+            nodes = list(self._active_entity_ids(t, on_date))
+            out_edges = {v: self._out_neighbors(t, v, on_date) for v in nodes}
+        n = len(nodes)
+        if n == 0:
+            return {}
+        rank = {v: 1.0 / n for v in nodes}
+        for _ in range(max_iterations):
+            new_rank = {v: (1.0 - damping) / n for v in nodes}
+            for v in nodes:
+                out = out_edges[v]
+                if not out:
+                    share = damping * rank[v] / n
+                    for u in nodes:
+                        new_rank[u] += share
+                else:
+                    share = damping * rank[v] / len(out)
+                    for u in out:
+                        new_rank[u] += share
+            diff = sum(abs(new_rank[v] - rank[v]) for v in nodes)
+            rank = new_rank
+            if diff < tol:
+                break
+        return rank
+
+    def pagerank(self, entity_id: str, on_date: str, damping: float = 0.85,
+                 max_iterations: int = 100) -> float:
+        """One entity's PageRank. See pagerank_all()'s docstring: this
+        still computes the whole graph internally, so prefer pagerank_all()
+        directly if you need more than one entity's score."""
+        _validate_identifier("entity_id", entity_id)
+        return self.pagerank_all(on_date, damping=damping, max_iterations=max_iterations).get(entity_id, 0.0)
 
     def get_entity(self, entity_id: str) -> Entity | None:
         with self._store.txn() as t:

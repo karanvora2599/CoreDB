@@ -295,7 +295,7 @@ def test_track_degree_and_edge_weight_point_sequences(db):
 
 def test_track_rejects_unknown_metric(db):
     with pytest.raises(coredb.ValidationError):
-        db.track("betweenness", "NVIDIA", "2026-01-01", "2026-01-05")
+        db.track("eigenvector_centrality", "NVIDIA", "2026-01-01", "2026-01-05")
 
 
 def test_path_exists_direct_and_multi_hop(db):
@@ -373,3 +373,102 @@ def test_path_history_shows_path_emerging(db):
     assert [p["date"] for p in points] == ["2024-01-01", "2024-06-29"]
     assert points[0]["path"] is None
     assert len(points[1]["path"]) == 3
+
+
+def _star_graph(db, hub, leaves, date="2026-01-01"):
+    for leaf in leaves:
+        db.assert_fact(hub, "CONNECTED_TO", leaf, date)
+
+
+def test_closeness_star_graph_hand_verified_values(db):
+    _star_graph(db, "Hub", ["L1", "L2", "L3", "L4"])
+    # Hub: distance 1 to each of 4 leaves -> 4 * (1/1) = 4.
+    assert db.closeness("Hub", "2026-01-05") == 4.0
+    # L1: distance 1 to Hub, distance 2 to each of the other 3 leaves via Hub
+    # -> 1/1 + 3*(1/2) = 2.5.
+    assert db.closeness("L1", "2026-01-05") == 2.5
+
+
+def test_closeness_respects_max_depth(db):
+    db.assert_fact("A", "L", "B", "2026-01-01")
+    db.assert_fact("B", "L", "C", "2026-01-01")
+    db.assert_fact("C", "L", "D", "2026-01-01")
+
+    assert db.closeness("A", "2026-01-05", max_depth=1) == 1.0            # only B
+    assert db.closeness("A", "2026-01-05", max_depth=3) == 1 + 0.5 + 1 / 3  # B, C, D
+
+
+def test_betweenness_path_graph_hand_verified_values(db):
+    # Classic textbook case: on path A-B-C, B lies on the only shortest path
+    # between A and C, so B's betweenness is 1.0 and A/C's are 0.
+    db.assert_fact("A", "LINK", "B", "2026-01-01")
+    db.assert_fact("B", "LINK", "C", "2026-01-01")
+
+    result = db.betweenness_all("2026-01-05")
+    assert result == {"A": 0.0, "B": 1.0, "C": 0.0}
+
+
+def test_betweenness_single_entity_matches_all(db):
+    db.assert_fact("A", "LINK", "B", "2026-01-01")
+    db.assert_fact("B", "LINK", "C", "2026-01-01")
+
+    all_scores = db.betweenness_all("2026-01-05")
+    assert db.betweenness("B", "2026-01-05") == all_scores["B"]
+    assert db.betweenness("A", "2026-01-05") == all_scores["A"]
+
+
+def test_betweenness_multi_edge_between_same_pair_is_not_double_counted(db):
+    # Two distinct relationships between the same pair (different
+    # predicates) must count as one graph edge, not inflate shortest-path
+    # counts in Brandes' algorithm.
+    db.assert_fact("A", "SUPPLIES", "B", "2026-01-01")
+    db.assert_fact("A", "PARTNERS_WITH", "B", "2026-01-01")
+    db.assert_fact("B", "LINK", "C", "2026-01-01")
+
+    result = db.betweenness_all("2026-01-05")
+    assert result == {"A": 0.0, "B": 1.0, "C": 0.0}
+
+
+def test_pagerank_hub_outranks_leaves(db):
+    db.assert_fact("L1", "LINKS_TO", "Hub", "2026-01-01")
+    db.assert_fact("L2", "LINKS_TO", "Hub", "2026-01-01")
+
+    ranks = db.pagerank_all("2026-01-05")
+    assert abs(sum(ranks.values()) - 1.0) < 1e-6
+    assert ranks["Hub"] > ranks["L1"]
+    assert ranks["Hub"] > ranks["L2"]
+
+
+def test_pagerank_single_entity_matches_all(db):
+    db.assert_fact("L1", "LINKS_TO", "Hub", "2026-01-01")
+
+    all_ranks = db.pagerank_all("2026-01-05")
+    assert db.pagerank("Hub", "2026-01-05") == all_ranks["Hub"]
+
+
+def test_active_entity_ids_is_scoped_by_date(db):
+    db.assert_fact("X", "REL", "Y", "2020-01-01")
+    db.retract_fact("X", "REL", "Y", "2020-06-01")
+    db.assert_fact("P", "REL", "Q", "2026-01-01")
+
+    with db._store.txn() as t:
+        active_2020 = db._active_entity_ids(t, "2020-03-01")
+        active_2026 = db._active_entity_ids(t, "2026-01-05")
+    assert active_2020 == {"X", "Y"}
+    assert active_2026 == {"P", "Q"}
+
+
+def test_track_centrality_metrics_via_track(db):
+    db.assert_fact("L1", "LINKS_TO", "Hub", "2026-01-01")
+    db.assert_fact("L2", "LINKS_TO", "Hub", "2026-01-01")
+    db.assert_fact("Hub", "CONNECTED_TO", "L1", "2026-01-01")
+    db.assert_fact("Hub", "CONNECTED_TO", "L2", "2026-01-01")
+
+    closeness_signal = db.track("closeness", "Hub", "2026-01-01", "2026-01-03")
+    assert closeness_signal.points[0] == ("2026-01-01", db.closeness("Hub", "2026-01-01"))
+
+    betweenness_signal = db.track("betweenness", "Hub", "2026-01-01", "2026-01-03")
+    assert betweenness_signal.points[0] == ("2026-01-01", db.betweenness("Hub", "2026-01-01"))
+
+    pagerank_signal = db.track("pagerank", "Hub", "2026-01-01", "2026-01-03")
+    assert pagerank_signal.points[0] == ("2026-01-01", db.pagerank("Hub", "2026-01-01"))

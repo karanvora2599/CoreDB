@@ -44,11 +44,19 @@ Multi-hop traversal, scoped to point-to-point path queries between two named ent
 - **`Database.path_history(subject, object_id, start, end, resolution_days=1, max_depth=4)`** — `path_exists` stepped across an interval.
 - **TGQL v0.4**: `PATH (A, B) AS OF '<date>' [MAX_DEPTH <n>]`, `FIRST_CONNECTED (A, B) [BETWEEN ... AND ...] [MAX_DEPTH <n>]`, `PATH_HISTORY (A, B) BETWEEN ... AND ... [RESOLUTION '<N>d'] [MAX_DEPTH <n>]`.
 
-"The full architecture" (complete the evolution algebra, embedded-library scope) breaks into three more milestones from here, in this order — each depends on what's already built:
+## Milestone 6 — done
 
-1. **Centrality-family `TRACK` metrics** (betweenness, closeness, PageRank) — next, since M5's BFS primitive is the foundation they need.
-2. **Provenance / `WHY_CHANGED`** — independent of traversal; the data model already captures what's needed (`assertion_ids`, `source_id`, `event_time`/`published_at`/`ingested_at`), the query surface to walk that lineage isn't built yet.
-3. **Change-point detection** — a native `CHANGEPOINTS` operator over a `GraphSeries`/`GraphSignal`, instead of requiring a separate offline ML job.
+Centrality metrics, built directly on M5's BFS primitives.
+
+- **`closeness(entity_id, on_date, max_depth=4)`** — harmonic closeness (`sum(1/distance)`), not the classical `(n-1)/sum(distances)` formula, which is undefined/misleading for a graph that may be disconnected or depth-bounded (both always true here). One bounded BFS per call via the new `_bfs_distances` primitive.
+- **`betweenness_all(on_date, max_depth=4)`/`betweenness(entity_id, ...)`** — Brandes' algorithm (unweighted, undirected) over every active entity (`_active_entity_ids`, a new full-`versions`-scan primitive), each source's BFS bounded by `max_depth`. `_neighbor_node_ids` (deduplicated by the *other node*, not by `relationship_id`) fixes a real multi-edge double-counting bug the naive approach would have had. A global computation — `betweenness_all` exposes the whole-graph result directly since the singular `betweenness()` wrapper would otherwise recompute it per call.
+- **`pagerank_all(on_date, damping=0.85, ...)`/`pagerank(entity_id, ...)`** — standard power-iteration PageRank over directed out-edges (`_out_neighbors`), same global-computation shape as betweenness.
+- **TGQL v0.5**: `TRACK CLOSENESS/BETWEENNESS/PAGERANK(entity) BETWEEN ... AND ... [MAX_DEPTH <n>]` — no new grammar statement needed (`TRACK` already accepted any metric identifier by M4's design), just new `_METRIC_ARITY` registry entries and an optional `MAX_DEPTH` clause added to `track_stmt`.
+
+"The full architecture" (complete the evolution algebra, embedded-library scope) has two milestones left, in this order:
+
+1. **Provenance / `WHY_CHANGED`** — next; independent of traversal, the data model already captures what's needed (`assertion_ids`, `source_id`, `event_time`/`published_at`/`ingested_at`), the query surface to walk that lineage isn't built yet.
+2. **Change-point detection** — a native `CHANGEPOINTS` operator over a `GraphSeries`/`GraphSignal`, instead of requiring a separate offline ML job.
 
 ## Explicitly deferred (not built yet)
 

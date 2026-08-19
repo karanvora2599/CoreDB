@@ -16,7 +16,10 @@ from .ast_nodes import (
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 
 # metric name -> number of target identifiers TRACK expects in parens.
-_METRIC_ARITY = {"degree": 1, "weighted_degree": 1, "edge_weight": 3}
+_METRIC_ARITY = {
+    "degree": 1, "weighted_degree": 1, "edge_weight": 3,
+    "closeness": 1, "betweenness": 1, "pagerank": 1,
+}
 
 
 def _unquote(token) -> str:
@@ -115,6 +118,7 @@ class _ASTBuilder(Transformer):
     def track_stmt(self, children):
         identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]
         strings = [c for c in children if getattr(c, "type", None) == "STRING"]
+        max_depths = [c for c in children if isinstance(c, int)]
         metric = str(identifiers[0]).lower()
         target_args = identifiers[1:]
 
@@ -132,7 +136,9 @@ class _ASTBuilder(Transformer):
         start = _unquote(strings[0])
         end = _unquote(strings[1])
         resolution_days = _parse_resolution(strings[2]) if len(strings) > 2 else 1
-        return TrackQuery(metric=metric, target=target, start=start, end=end, resolution_days=resolution_days)
+        max_depth = max_depths[0] if max_depths else 4
+        return TrackQuery(metric=metric, target=target, start=start, end=end,
+                           resolution_days=resolution_days, max_depth=max_depth)
 
     def path_stmt(self, children):
         identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]

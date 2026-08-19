@@ -82,11 +82,12 @@ class RetractStatement:
 
 @dataclass
 class TrackQuery:
-    metric: str                  # "degree" | "weighted_degree" | "edge_weight"
+    metric: str                  # "degree" | "weighted_degree" | "edge_weight" | "closeness" | "betweenness" | "pagerank"
     target: str | tuple          # entity_id, or (subject, predicate, object) for edge_weight
     start: str
     end: str
     resolution_days: int = 1
+    max_depth: int = 4           # only used by closeness/betweenness; harmless otherwise
 
 
 @dataclass

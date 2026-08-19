@@ -16,7 +16,7 @@ coredb/
 │   └── keys.py               # composite key encoding for LMDB's sorted byte-string keys
 └── query/
     ├── grammar.lark          # Lark grammar for TGQL (coredb/query language)
-    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery, PathQuery, FirstConnectedQuery, PathHistoryQuery
+    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery (degree/closeness/betweenness/pagerank/...), PathQuery, FirstConnectedQuery, PathHistoryQuery
     ├── parser.py              # Lark parse tree -> AST
     └── executor.py            # AST -> engine.py calls -> plain dict/list[dict] results
 ```
@@ -65,6 +65,11 @@ What's **not** covered: multiple *processes* writing to the same database (LMDB 
 
 Cost scales with branching factor (average degree) to the power of `max_depth`, with no traversal-specific index (like a precomputed reachability structure) yet — fine for the graphs this has been exercised on, a likely place to revisit if traversal becomes a bottleneck on a high-degree graph.
 
+**Centrality** (TGQL v0.5) builds three more primitives on top: `_neighbor_node_ids` (like `_neighbor_versions` but deduplicated by the *other node* rather than by `relationship_id`, so two entities connected by more than one relationship count as one graph edge — the correctness fix `betweenness_all` needs, since Brandes' shortest-path counting would otherwise double-count a multi-edge pair); `_bfs_distances` (a full bounded-BFS distance map, generalizing `path_exists`'s single-target search); and `_active_entity_ids` (every entity with a relationship active on a date — the node set for the two genuinely global algorithms below, requiring a full `versions` scan since no "distinct entities as of a date" index exists, the same limitation `diff()`'s global branch already has).
+
+- **`closeness`** — one bounded BFS (`_bfs_distances`) per call; as cheap as `degree`/`path_exists`.
+- **`betweenness_all`/`pagerank_all`** — process every entity in `_active_entity_ids` in one pass (Brandes' algorithm; PageRank power iteration), regardless of which entity the caller actually wants. These are the most expensive operations in the engine so far, with no caching or incrementality — `TRACK BETWEENNESS`/`TRACK PAGERANK` across many resolution steps re-runs the full graph computation at every single step. `betweenness`/`pagerank` (singular) are convenience wrappers around these that extract one entity's score, each paying that same full cost per call — prefer the `_all` form directly when scoring more than one entity.
+
 ## Storage management
 
 - **Schema versioning.** `Database` writes a `schema_version` marker into the `counters` table on first open. If an existing database's marker doesn't match the running code's expected version, `Database()` raises `SchemaVersionError` immediately rather than silently operating on a mismatched on-disk shape. Recovery path: `Database.dump()` with the old code version, `coredb.restore()` with the new one.
@@ -79,4 +84,5 @@ Cost scales with branching factor (average degree) to the power of `max_depth`, 
 - **Global (pattern-less) `DIFF`'s "persisted" set** is a full table scan — there's no interval index yet for "spans both dates" the way `opened_time_idx`/`closed_time_idx` cover the open/close cases.
 - **`MATCH`/`HISTORY` patterns are still single-hop only.** `(subject, predicate, object)` triples with no chain syntax — `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY` (above) added point-to-point traversal between two named entities, not general multi-hop *pattern matching*. See `ROADMAP.md`.
 - **No traversal-specific index.** BFS cost scales with branching factor × `max_depth`; see "Traversal" above.
+- **No caching for `betweenness_all`/`pagerank_all`.** Both are full-graph computations with no incrementality; see "Traversal" above.
 - **No automatic map-size growth or multi-process write coordination.** See "Concurrency" and "Storage management" above.

@@ -122,9 +122,24 @@ def test_parse_track_edge_weight():
 
 def test_parse_track_rejects_unknown_metric_and_wrong_arity():
     with pytest.raises(coredb.QueryError):
-        parse("TRACK BETWEENNESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
+        parse("TRACK EIGENVECTOR_CENTRALITY(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
     with pytest.raises(coredb.QueryError):
         parse("TRACK DEGREE(NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-01-10'")
+
+
+def test_parse_track_centrality_metrics():
+    ast = parse("TRACK CLOSENESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
+    assert ast.metric == "closeness"
+    assert ast.max_depth == 4
+
+    ast2 = parse("TRACK BETWEENNESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10' MAX_DEPTH 2")
+    assert ast2.metric == "betweenness"
+    assert ast2.max_depth == 2
+
+    ast3 = parse("TRACK PAGERANK(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10' RESOLUTION '7d'")
+    assert ast3.metric == "pagerank"
+    assert ast3.resolution_days == 7
+    assert ast3.max_depth == 4
 
 
 def test_parse_path():
@@ -286,3 +301,15 @@ def test_executor_path_history_matches_direct_engine_call(db):
     direct = db.path_history("NVIDIA", "Microsoft", "2024-01-01", "2024-07-01", resolution_days=180)
     rows = db.execute("PATH_HISTORY (NVIDIA, Microsoft) BETWEEN '2024-01-01' AND '2024-07-01' RESOLUTION '180d'")
     assert rows == direct
+
+
+def test_executor_track_centrality_metrics_match_direct_engine_calls(db):
+    db.assert_fact("L1", "LINKS_TO", "Hub", "2026-01-01")
+    db.assert_fact("L2", "LINKS_TO", "Hub", "2026-01-01")
+    db.assert_fact("Hub", "CONNECTED_TO", "L1", "2026-01-01")
+    db.assert_fact("Hub", "CONNECTED_TO", "L2", "2026-01-01")
+
+    for metric in ("closeness", "betweenness", "pagerank"):
+        direct = db.track(metric, "Hub", "2026-01-01", "2026-01-03")
+        rows = db.execute(f"TRACK {metric.upper()}(Hub) BETWEEN '2026-01-01' AND '2026-01-03'")
+        assert [(r["date"], r["value"]) for r in rows] == direct.points

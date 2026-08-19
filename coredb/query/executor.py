@@ -109,7 +109,8 @@ def execute(db, ast) -> list[dict] | dict:
         return {"version_id": vid}
 
     if isinstance(ast, TrackQuery):
-        signal = db.track(ast.metric, ast.target, ast.start, ast.end, ast.resolution_days)
+        signal = db.track(ast.metric, ast.target, ast.start, ast.end,
+                           ast.resolution_days, max_depth=ast.max_depth)
         return [{"date": d, "value": v} for d, v in signal.points]
 
     if isinstance(ast, PathQuery):
