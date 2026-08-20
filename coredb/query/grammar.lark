@@ -30,6 +30,9 @@
 //   TRACK CLOSENESS(NVIDIA) BETWEEN 'd1' AND 'd2' [MAX_DEPTH 4]
 //   TRACK BETWEENNESS(NVIDIA) BETWEEN 'd1' AND 'd2' [MAX_DEPTH 4]
 //   TRACK PAGERANK(NVIDIA) BETWEEN 'd1' AND 'd2'
+//
+// TGQL v0.6 additions - provenance:
+//   WHY_CHANGED (SUBJECT, PREDICATE, OBJECT) BETWEEN 'd1' AND 'd2'
 
 start: statement
 
@@ -44,6 +47,7 @@ statement: match_stmt
          | path_stmt
          | first_connected_stmt
          | path_history_stmt
+         | why_changed_stmt
 
 match_stmt: "MATCH"i pattern "AS"i "OF"i STRING ("KNOWN"i "BY"i STRING)? where_clause? limit_clause?
 history_stmt: "HISTORY"i pattern ("BETWEEN"i STRING "AND"i STRING)? where_clause? limit_clause?
@@ -56,6 +60,7 @@ track_stmt: "TRACK"i IDENTIFIER "(" IDENTIFIER ("," IDENTIFIER "," IDENTIFIER)? 
 path_stmt: "PATH"i "(" IDENTIFIER "," IDENTIFIER ")" "AS"i "OF"i STRING max_depth_clause?
 first_connected_stmt: "FIRST_CONNECTED"i "(" IDENTIFIER "," IDENTIFIER ")" ("BETWEEN"i STRING "AND"i STRING)? max_depth_clause?
 path_history_stmt: "PATH_HISTORY"i "(" IDENTIFIER "," IDENTIFIER ")" "BETWEEN"i STRING "AND"i STRING ("RESOLUTION"i STRING)? max_depth_clause?
+why_changed_stmt: "WHY_CHANGED"i pattern "BETWEEN"i STRING "AND"i STRING
 
 where_clause: "WHERE"i "confidence"i COMPARATOR NUMBER
 limit_clause: "LIMIT"i NUMBER

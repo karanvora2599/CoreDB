@@ -10,7 +10,7 @@ from ..errors import CoreDBError, QueryError
 from .ast_nodes import (
     AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery,
     PathHistoryQuery, PathQuery, RangeQuery, RetractStatement, SeriesQuery,
-    Term, TrackQuery, WhereClause,
+    Term, TrackQuery, WhereClause, WhyChangedQuery,
 )
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
@@ -170,6 +170,12 @@ class _ASTBuilder(Transformer):
         max_depth = max_depths[0] if max_depths else 4
         return PathHistoryQuery(a=a, b=b, start=start, end=end,
                                  resolution_days=resolution_days, max_depth=max_depth)
+
+    def why_changed_stmt(self, children):
+        pattern = children[0]
+        date_from = _unquote(children[1])
+        date_to = _unquote(children[2])
+        return WhyChangedQuery(pattern=pattern, date_from=date_from, date_to=date_to)
 
     def statement(self, children):
         return children[0]

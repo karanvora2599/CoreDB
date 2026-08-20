@@ -115,3 +115,10 @@ class PathHistoryQuery:
     end: str
     resolution_days: int = 1
     max_depth: int = 4
+
+
+@dataclass
+class WhyChangedQuery:
+    pattern: Pattern
+    date_from: str
+    date_to: str

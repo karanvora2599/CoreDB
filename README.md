@@ -14,7 +14,8 @@ This project generalizes a pattern first proven in [`Knowledge_Graph`](../Knowle
 - **Milestone 4** (done): TGQL v0.3 (`TRACK`), turning a graph metric (`DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT`) into a `GraphSignal` time series joinable against external (non-graph) data.
 - **Milestone 5** (done): TGQL v0.4 (`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`), point-to-point multi-hop traversal between two named entities via bounded BFS.
 - **Milestone 6** (done): TGQL v0.5 (`TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK`), centrality metrics built on M5's traversal — closeness is harmonic (handles a disconnected/depth-bounded graph honestly), betweenness/PageRank are exposed both per-entity and as whole-graph `_all` variants since they're inherently global computations.
-- "Full architecture" = completing the evolution algebra as an embedded library: two milestones left — provenance/`WHY_CHANGED`, then change-point detection. See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deferred outside this scope (general multi-hop pattern matching, streaming, a server mode).
+- **Milestone 7** (done): TGQL v0.6 (`WHY_CHANGED`), tracing what changed about a relationship and which `Assertion`/`Source` evidence is responsible — the provenance chain the data model has captured since M2, finally with a query surface.
+- "Full architecture" = completing the evolution algebra as an embedded library: one milestone left — change-point detection. See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deferred outside this scope (general multi-hop pattern matching, streaming, a server mode).
 
 ## Install
 
@@ -68,6 +69,9 @@ db.execute("PATH_HISTORY (NVIDIA, OpenAI) BETWEEN '2026-01-01' AND '2026-06-01' 
 db.execute("TRACK CLOSENESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10'")
 db.execute("TRACK BETWEENNESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-10' MAX_DEPTH 3")
 db.betweenness_all("2026-01-10")   # whole-graph score, cheaper than looping per entity
+
+# Provenance: what changed, and which evidence is responsible.
+db.execute("WHY_CHANGED (NVIDIA, SUPPLIED_BY, Samsung) BETWEEN '2026-01-01' AND '2026-06-01'")
 
 # Storage management.
 db.stats()               # entry counts per table

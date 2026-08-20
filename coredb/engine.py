@@ -20,7 +20,7 @@ from collections import deque
 from datetime import date, datetime, timezone
 
 from .errors import SchemaVersionError, ValidationError
-from .model import Assertion, Entity, RelationshipVersion
+from .model import Assertion, Entity, RelationshipVersion, Source
 from .series import GraphDelta, GraphSeries, date_range
 from .signal import GraphSignal
 from .storage import keys as K
@@ -134,6 +134,18 @@ class Database:
             {"source_id": sid, "url": url, "title": title, "domain": domain}
         ).encode())
         return sid
+
+    def _load_source(self, t, source_id: int) -> Source | None:
+        """Resolve a source_id back to its Source record. The sources table
+        is keyed by url (for _find_or_create_source's dedup), not by
+        source_id, so this is a full scan - a one-off provenance lookup,
+        not a hot path, same tradeoff as _active_entity_ids/diff()'s global
+        branch."""
+        for _, val in t.range_iter("sources", b"", b"\xff"):
+            s = Source.from_dict(json.loads(val))
+            if s.source_id == source_id:
+                return s
+        return None
 
     def _create_assertions(self, t, relationship_id: int, version_id: int, source_list,
                             event_time: str, ingested_at: str, confidence: float | None) -> list[int]:
@@ -800,6 +812,85 @@ class Database:
         directly if you need more than one entity's score."""
         _validate_identifier("entity_id", entity_id)
         return self.pagerank_all(on_date, damping=damping, max_iterations=max_iterations).get(entity_id, 0.0)
+
+    # ------------------------------------------------------------------
+    # Provenance - the data model has captured this since M2
+    # (RelationshipVersion.assertion_ids, Assertion.source_id/event_time/
+    # published_at/ingested_at) but never had a query surface to walk it
+    # until now.
+    # ------------------------------------------------------------------
+
+    def assertions_for_version(self, version_id: int) -> list[Assertion]:
+        """Every Assertion backing one specific RelationshipVersion, in
+        ingested_at order."""
+        with self._store.txn() as t:
+            version = self._load_version(t, version_id)
+            assertions = []
+            for aid in version.assertion_ids:
+                raw = t.get("assertions", K.encode_id(aid))
+                if raw:
+                    assertions.append(Assertion.from_dict(json.loads(raw)))
+        assertions.sort(key=lambda a: a.ingested_at)
+        return assertions
+
+    def why_changed(self, subject: str, predicate: str, object_id: str,
+                     date_from: str, date_to: str) -> dict:
+        """Traces what changed about one relationship between two dates and
+        which assertions (evidence) are responsible: the interval-level
+        status (from diff(), scoped to this exact triple) plus every
+        assertion attached to any of this triple's versions whose
+        ingested_at falls in [date_from, date_to], each resolved to its
+        source - the evidence trail behind the status."""
+        _validate_identifier("subject", subject)
+        _validate_identifier("predicate", predicate)
+        _validate_identifier("object_id", object_id)
+        _validate_date("date_from", date_from)
+        _validate_date("date_to", date_to)
+
+        pattern = (subject, predicate, object_id)
+        result = self.diff(date_from, date_to, pattern)
+        opened, closed, persisted = result["opened"], result["closed"], result["persisted"]
+        if opened and closed:
+            status = "churned"
+        elif opened:
+            status = "opened"
+        elif closed:
+            status = "closed"
+        elif persisted:
+            status = "persisted"
+        else:
+            status = "no_relationship"
+
+        assertions = []
+        for v in self.history(pattern):
+            assertions.extend(self.assertions_for_version(v.version_id))
+        # Filter by event_time (valid time - the date each assertion's claim
+        # pertains to, e.g. its valid_from/as_of_date at creation), not
+        # ingested_at (system time - when it was recorded): status above is
+        # a valid-time classification via diff(), so the evidence trail
+        # needs to align with that, not with when the system happened to
+        # learn about it. Assertions without an event_time (defensive -
+        # every current call site always sets it) are excluded, since
+        # there's nothing to judge "in window" against.
+        assertions = [a for a in assertions if a.event_time is not None and date_from <= a.event_time <= date_to]
+        assertions.sort(key=lambda a: a.ingested_at)
+
+        with self._store.txn() as t:
+            provenance = []
+            for a in assertions:
+                source = self._load_source(t, a.source_id) if a.source_id is not None else None
+                provenance.append({"assertion": a.to_dict(), "source": source.to_dict() if source else None})
+
+        return {
+            "subject_id": subject, "predicate": predicate, "object_id": object_id,
+            "date_from": date_from, "date_to": date_to, "status": status,
+            "versions": {
+                "opened": [v.to_dict() for v in opened],
+                "closed": [v.to_dict() for v in closed],
+                "persisted": [v.to_dict() for v in persisted],
+            },
+            "assertions": provenance,
+        }
 
     def get_entity(self, entity_id: str) -> Entity | None:
         with self._store.txn() as t:

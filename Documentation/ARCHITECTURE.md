@@ -16,7 +16,7 @@ coredb/
 │   └── keys.py               # composite key encoding for LMDB's sorted byte-string keys
 └── query/
     ├── grammar.lark          # Lark grammar for TGQL (coredb/query language)
-    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery (degree/closeness/betweenness/pagerank/...), PathQuery, FirstConnectedQuery, PathHistoryQuery
+    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery (degree/closeness/betweenness/pagerank/...), PathQuery, FirstConnectedQuery, PathHistoryQuery, WhyChangedQuery
     ├── parser.py              # Lark parse tree -> AST
     └── executor.py            # AST -> engine.py calls -> plain dict/list[dict] results
 ```
@@ -69,6 +69,10 @@ Cost scales with branching factor (average degree) to the power of `max_depth`, 
 
 - **`closeness`** — one bounded BFS (`_bfs_distances`) per call; as cheap as `degree`/`path_exists`.
 - **`betweenness_all`/`pagerank_all`** — process every entity in `_active_entity_ids` in one pass (Brandes' algorithm; PageRank power iteration), regardless of which entity the caller actually wants. These are the most expensive operations in the engine so far, with no caching or incrementality — `TRACK BETWEENNESS`/`TRACK PAGERANK` across many resolution steps re-runs the full graph computation at every single step. `betweenness`/`pagerank` (singular) are convenience wrappers around these that extract one entity's score, each paying that same full cost per call — prefer the `_all` form directly when scoring more than one entity.
+
+## Provenance
+
+`WHY_CHANGED` (TGQL v0.6) walks the `Assertion`/`Source` chain the data model has captured since M2 but had no query surface for until now. `_load_source(t, source_id)` is a full scan of the `sources` table (keyed by `url` for `_find_or_create_source`'s dedup, not by `source_id`) — a one-off provenance lookup, not a hot path, the same tradeoff as `_active_entity_ids`/`diff()`'s global branch. `why_changed()`'s evidence-window filter uses each `Assertion`'s `event_time` (the valid-time date its claim pertains to — always equal to the `valid_from`/`as_of_date` passed to `assert_fact`/`sync_snapshot` at creation), not `ingested_at` (system time, when the assertion was recorded) — this keeps the evidence trail aligned with the `status` field, which is a valid-time classification via `diff()`.
 
 ## Storage management
 

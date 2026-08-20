@@ -53,10 +53,17 @@ Centrality metrics, built directly on M5's BFS primitives.
 - **`pagerank_all(on_date, damping=0.85, ...)`/`pagerank(entity_id, ...)`** — standard power-iteration PageRank over directed out-edges (`_out_neighbors`), same global-computation shape as betweenness.
 - **TGQL v0.5**: `TRACK CLOSENESS/BETWEENNESS/PAGERANK(entity) BETWEEN ... AND ... [MAX_DEPTH <n>]` — no new grammar statement needed (`TRACK` already accepted any metric identifier by M4's design), just new `_METRIC_ARITY` registry entries and an optional `MAX_DEPTH` clause added to `track_stmt`.
 
-"The full architecture" (complete the evolution algebra, embedded-library scope) has two milestones left, in this order:
+## Milestone 7 — done
 
-1. **Provenance / `WHY_CHANGED`** — next; independent of traversal, the data model already captures what's needed (`assertion_ids`, `source_id`, `event_time`/`published_at`/`ingested_at`), the query surface to walk that lineage isn't built yet.
-2. **Change-point detection** — a native `CHANGEPOINTS` operator over a `GraphSeries`/`GraphSignal`, instead of requiring a separate offline ML job.
+Provenance, built on the `Assertion`/`Source` chain the data model has captured since M2.
+
+- **`Database.assertions_for_version(version_id)`** — every `Assertion` backing one version, chronological.
+- **`Database.why_changed(subject, predicate, object_id, date_from, date_to)`** — combines `diff()`'s interval-level classification (`"opened"`/`"closed"`/`"churned"`/`"persisted"`/`"no_relationship"`, `"churned"` being new — both opened and closed within the window) with the evidence trail: every assertion across this triple's history whose `event_time` (valid time, not `ingested_at`/system time) falls in the window, resolved to its `Source` via a new `_load_source` full-scan primitive.
+- **TGQL v0.6**: `WHY_CHANGED (...) BETWEEN ... AND ...`, reusing the `pattern` grammar (fully literal, like `ASSERT`/`RETRACT`).
+
+"The full architecture" (complete the evolution algebra, embedded-library scope) has one milestone left:
+
+1. **Change-point detection** — a native `CHANGEPOINTS` operator over a `GraphSignal`, instead of requiring a separate offline ML job.
 
 ## Explicitly deferred (not built yet)
 
@@ -68,7 +75,8 @@ These come from a broader architectural vision shared during design discussion, 
 - **Query optimizer** — right now every query method picks its own access path in Python (bound subject → `spo_idx`, bound object → `ops_idx`, neither → full scan; BFS has no traversal-specific index either). A real operator tree with cost-based planning is future work, not attempted yet.
 - **Server / wire protocol / PostgreSQL** — CoreDB stays an embedded library. A client-server mode is a deliberate non-goal until multi-process/multi-user access is actually needed.
 - **Automatic map-size growth and multi-process write coordination** — `MapFullError` is caught and explained (M3), but growing the map automatically would require safely replaying an arbitrary caller-supplied transaction, which isn't generalizable; multi-process writers are untested.
-- **`WHERE` beyond `confidence`, and on `DIFF`/`RANGE`/`SERIES`/`TRACK`/`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`** — see `TGQL_SPEC.md`'s "Not yet supported" section.
+- **`WHERE` beyond `confidence`, and on `DIFF`/`RANGE`/`SERIES`/`TRACK`/`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`/`WHY_CHANGED`** — see `TGQL_SPEC.md`'s "Not yet supported" section.
+- **`assertions_for_version()` from TGQL** — version ids are internal; `WHY_CHANGED` is the entity/triple-oriented surface for provenance.
 - **`ASSERT ... SOURCE '<url>'`** — provenance attachment from TGQL; sources remain Python-API-only for now.
 - **`GraphSignal.join()` from TGQL** — joining a `TRACK` signal against external data needs caller-supplied data, so it stays Python-API-only, same reasoning as `ASSERT ... SOURCE`.
 - **Benchmark suite** — a dedicated benchmark (`GraphTSBench`-style: `AS_OF`, bitemporal reconstruction, `HISTORY`, `DIFF`, `TRACK`, `PATH`, change-point, provenance, cross-modal joins) to measure latency/storage/reconstruction cost as the engine matures.

@@ -176,16 +176,41 @@ PATH_HISTORY (NVIDIA, OpenAI) BETWEEN '2024-01-01' AND '2025-01-01' RESOLUTION '
 
 **Result:** `list[dict]` — `[{"date": ..., "path": [<version dict>, ...] | None}, ...]`.
 
+## TGQL v0.6 (provenance)
+
+### `WHY_CHANGED (...) BETWEEN '<date>' AND '<date>'`
+
+Traces what changed about one relationship between two dates and which assertions (evidence) are responsible. Reuses the `pattern` grammar (like `ASSERT`/`RETRACT`) and requires a **fully literal** triple — `?` wildcards aren't allowed, since this traces one specific relationship, not a pattern match.
+
+```
+WHY_CHANGED (NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-06-01'
+```
+
+**Result:**
+
+```python
+{
+    "subject_id": ..., "predicate": ..., "object_id": ...,
+    "date_from": ..., "date_to": ...,
+    "status": "opened" | "closed" | "churned" | "persisted" | "no_relationship",
+    "versions": {"opened": [...], "closed": [...], "persisted": [...]},  # from diff(), scoped to this triple
+    "assertions": [{"assertion": {...}, "source": {...} | None}, ...],  # chronological, event_time-filtered
+}
+```
+
+`status` mirrors `DIFF`'s classification (`"churned"` is new here: both opened and closed within the window — closed then reopened). `assertions` is every piece of evidence across this triple's full history (via `Database.assertions_for_version()`) whose `event_time` — the valid-time date each assertion's claim pertains to, **not** `ingested_at` (when the system recorded it) — falls in `[date_from, date_to]`, so the evidence trail lines up with `status`'s valid-time classification instead of when the data happened to arrive.
+
 ## Not yet supported
 
 These are deliberately out of scope so far — see `Documentation/ROADMAP.md` for the fuller picture of what's deferred and why:
 
 - **General multi-hop pattern matching** inside `MATCH`/`HISTORY` (`(a)-[]->(b)-[]->(c)` chains with wildcards at each hop) — v0.4's `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY` are point-to-point queries between two named entities, not a path-pattern grammar.
-- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, `TRACK`, `PATH`, `FIRST_CONNECTED`, or `PATH_HISTORY` — only `MATCH`/`HISTORY` support them.
+- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, `TRACK`, `PATH`, `FIRST_CONNECTED`, `PATH_HISTORY`, or `WHY_CHANGED` — only `MATCH`/`HISTORY` support them.
 - `WHERE` on any field other than `confidence` — no query planner support yet for filtering on `properties` or other fields.
 - `ASSERT ... SOURCE '<url>'` — attaching provenance from the DSL. Sources are still Python-API-only (`sources=[...]` on `assert_fact`/`sync_snapshot`).
 - `GraphSignal.join()` from TGQL — see the `TRACK` section above.
 - `betweenness_all()`/`pagerank_all()` from TGQL — `TRACK` is per-entity by design; the full-graph dict result doesn't fit its shape. Python-API-only for now.
+- `assertions_for_version()` from TGQL — version ids are internal, not something TGQL users type by hand; `WHY_CHANGED` is the entity/triple-oriented surface for this.
 - `ORDER BY` — `HISTORY` is always chronological; there's no way to sort `MATCH` results yet.
 
 ## Version history
@@ -195,3 +220,4 @@ These are deliberately out of scope so far — see `Documentation/ROADMAP.md` fo
 - **v0.3** — `TRACK` (`DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT`), turning a graph metric into a time series.
 - **v0.4** — `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`, point-to-point multi-hop traversal via bounded BFS.
 - **v0.5** — `TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK`, centrality metrics built on v0.4's traversal.
+- **v0.6** — `WHY_CHANGED`, walking the `Assertion`/`Source` provenance chain the data model has captured since M2.

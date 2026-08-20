@@ -472,3 +472,67 @@ def test_track_centrality_metrics_via_track(db):
 
     pagerank_signal = db.track("pagerank", "Hub", "2026-01-01", "2026-01-03")
     assert pagerank_signal.points[0] == ("2026-01-01", db.pagerank("Hub", "2026-01-01"))
+
+
+def test_assertions_for_version_chronological_order(db):
+    vid = db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01",
+                          confidence=0.6, sources=["https://example.com/late", "https://example.com/early"])
+    assertions = db.assertions_for_version(vid)
+    assert len(assertions) == 2
+    assert assertions == sorted(assertions, key=lambda a: a.ingested_at)
+
+
+def test_why_changed_status_opened(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-03-01")
+    result = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
+    assert result["status"] == "opened"
+
+
+def test_why_changed_status_closed(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2025-01-01")
+    db.retract_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-03-01")
+    result = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
+    assert result["status"] == "closed"
+
+
+def test_why_changed_status_persisted(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2025-01-01")
+    result = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
+    assert result["status"] == "persisted"
+
+
+def test_why_changed_status_churned(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
+    db.retract_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-03-01")
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-04-01")
+    result = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
+    assert result["status"] == "churned"
+
+
+def test_why_changed_status_no_relationship(db):
+    result = db.why_changed("X", "Y", "Z", "2026-01-01", "2026-06-01")
+    assert result["status"] == "no_relationship"
+    assert result["assertions"] == []
+
+
+def test_why_changed_filters_assertions_by_event_time_window(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.6,
+                    sources=["https://example.com/a"])
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-03-01", confidence=0.9,
+                    sources=["https://example.com/b"])
+
+    both = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
+    assert len(both["assertions"]) == 2
+
+    narrow = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-01-15")
+    assert len(narrow["assertions"]) == 1
+    assert narrow["assertions"][0]["assertion"]["confidence"] == 0.6
+    assert narrow["assertions"][0]["source"]["url"] == "https://example.com/a"
+
+
+def test_why_changed_with_no_sources_given_has_no_provenance(db):
+    # No sources -> _create_assertions never runs, so assertion_ids stays
+    # empty. why_changed should report an empty evidence trail, not crash.
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.6)
+    result = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
+    assert result["assertions"] == []

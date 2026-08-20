@@ -3,7 +3,7 @@ import pytest
 import coredb
 from coredb.query.ast_nodes import (
     AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery, PathHistoryQuery,
-    PathQuery, RangeQuery, RetractStatement, SeriesQuery, TrackQuery,
+    PathQuery, RangeQuery, RetractStatement, SeriesQuery, TrackQuery, WhyChangedQuery,
 )
 from coredb.query.parser import parse
 
@@ -177,6 +177,13 @@ def test_parse_path_history():
     assert ast2.max_depth == 3
 
 
+def test_parse_why_changed():
+    ast = parse("WHY_CHANGED (NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-06-01'")
+    assert isinstance(ast, WhyChangedQuery)
+    assert ast.pattern[0].value == "NVIDIA"
+    assert ast.date_from == "2026-01-01" and ast.date_to == "2026-06-01"
+
+
 def test_executor_match_matches_direct_engine_call(db):
     db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
     direct = db.as_of(("NVIDIA", "SUPPLIED_BY", None), "2026-01-05")
@@ -313,3 +320,17 @@ def test_executor_track_centrality_metrics_match_direct_engine_calls(db):
         direct = db.track(metric, "Hub", "2026-01-01", "2026-01-03")
         rows = db.execute(f"TRACK {metric.upper()}(Hub) BETWEEN '2026-01-01' AND '2026-01-03'")
         assert [(r["date"], r["value"]) for r in rows] == direct.points
+
+
+def test_executor_why_changed_matches_direct_engine_call(db):
+    db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.6,
+                    sources=["https://example.com/a"])
+
+    direct = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
+    result = db.execute("WHY_CHANGED (NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-06-01'")
+    assert result == direct
+
+
+def test_executor_why_changed_rejects_variable_pattern(db):
+    with pytest.raises(coredb.ValidationError):
+        db.execute("WHY_CHANGED (NVIDIA, ?p, TSMC) BETWEEN '2026-01-01' AND '2026-06-01'")

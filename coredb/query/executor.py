@@ -8,7 +8,7 @@ from ..errors import ValidationError
 from .ast_nodes import (
     AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery,
     PathHistoryQuery, PathQuery, Pattern, RangeQuery, RetractStatement,
-    SeriesQuery, TrackQuery, WhereClause,
+    SeriesQuery, TrackQuery, WhereClause, WhyChangedQuery,
 )
 
 _FIELD_BY_POSITION = ("subject_id", "predicate", "object_id")
@@ -24,10 +24,10 @@ def _pattern_values(pattern: Pattern) -> tuple:
 
 
 def _require_literal_pattern(pattern: Pattern) -> tuple:
-    """ASSERT/RETRACT write to one specific triple - '?' wildcards don't
-    make sense there."""
+    """ASSERT/RETRACT/WHY_CHANGED each operate on one specific triple - '?'
+    wildcards don't make sense there."""
     if any(term.is_var for term in pattern):
-        raise ValidationError("ASSERT/RETRACT patterns must be fully literal - '?' wildcards aren't allowed")
+        raise ValidationError("this statement's pattern must be fully literal - '?' wildcards aren't allowed")
     return _pattern_values(pattern)
 
 
@@ -124,5 +124,9 @@ def execute(db, ast) -> list[dict] | dict:
     if isinstance(ast, PathHistoryQuery):
         return db.path_history(ast.a, ast.b, ast.start, ast.end,
                                 resolution_days=ast.resolution_days, max_depth=ast.max_depth)
+
+    if isinstance(ast, WhyChangedQuery):
+        subject, predicate, obj = _require_literal_pattern(ast.pattern)
+        return db.why_changed(subject, predicate, obj, ast.date_from, ast.date_to)
 
     raise TypeError(f"unknown AST node: {ast!r}")
