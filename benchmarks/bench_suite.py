@@ -24,6 +24,19 @@ def bench_ingest(quick: bool):
         return bench("ingest.assert_fact", n, run)
 
 
+def bench_ingest_batched(quick: bool):
+    """Same workload as bench_ingest, isolating write_batch()'s effect -
+    one LMDB transaction for the whole batch instead of one per assert_fact
+    call. See ARCHITECTURE.md's Performance section (M10 remaining parts)."""
+    n = 200 if quick else 2000
+    with temp_db() as db:
+        def run():
+            with db.write_batch():
+                for i in range(n):
+                    db.assert_fact(f"S{i}", "LINK", f"O{i}", "2020-01-01")
+        return bench("ingest.assert_fact (batched)", n, run)
+
+
 def bench_as_of(quick: bool):
     n_entities, n_edges = (50, 100) if quick else (500, 2000)
     with temp_db() as db:
@@ -224,6 +237,7 @@ def bench_dump_restore(quick: bool):
 
 BENCHMARKS = [
     bench_ingest,
+    bench_ingest_batched,
     bench_as_of,
     bench_history,
     bench_diff_global,

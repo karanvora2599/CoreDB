@@ -10,6 +10,7 @@ coredb/
 ├── engine.py                # Database: mutation + query + storage-management methods
 ├── series.py                # GraphSeries (lazy interval view), GraphDelta (structured diff), date_range()
 ├── signal.py                # GraphSignal (metric evaluated across time, joinable against external data), detect_changepoints() (binary segmentation)
+├── graph_algorithms.py       # betweenness/pagerank over a plain adjacency list - native dispatch, pure-Python fallback
 ├── storage/
 │   ├── kvstore.py           # KVStore/Transaction interface - engine.py never talks to LMDB directly
 │   ├── lmdb_backend.py       # LMDB implementation of KVStore
@@ -107,7 +108,15 @@ Cost scales with branching factor (average degree) to the power of `max_depth`, 
 - **Part 1 — `detect_changepoints_indices`** (`native/segmentation.cpp`): binary segmentation's index-space search. Measured (n=365, a signal with real regime shifts, isolated from `TRACK`'s own cost): 25.9ms (Python) → 0.40ms (native), ≈65×. On the full `changepoints.degree` benchmark (`TRACK` + segmentation together, H=150, D=365): 2.35s → 15ms end to end, combining M9's interval-sweep fix and this pilot.
 - **Part 2 — `brandes_betweenness`/`pagerank`** (`native/centrality.cpp`): `engine.py`'s `betweenness_all()`/`pagerank_all()` still do their own LMDB reads (building a plain local-integer-indexed adjacency/out-edge list — no storage format changed, this stays Python's job since only Python has a transaction), then hand that adjacency to `coredb/graph_algorithms.py`, which dispatches to native. Measured (n=150 nodes, isolated from the LMDB adjacency build): betweenness 18.2ms → 3.4ms (≈5×), PageRank 0.73ms → 0.06ms (≈12×). `TRACK BETWEENNESS`/`PAGERANK`'s outer per-resolution-step loop is unchanged (see "Centrality" above) — this reduced the cost of each step, not the step count.
 
-This is the project's first native code, deliberately sequenced pure-computation-first (no on-disk format touched) to prove the pybind11/MSVC toolchain and the optional-acceleration pattern before attempting anything riskier. See `ROADMAP.md`'s Milestone 10 for what's next (the storage/ingest-path proposal: `VersionCore`, integer-interned ids, covering indexes, batch writes) and what's deliberately still deferred.
+This is the project's first native code, deliberately sequenced pure-computation-first (no on-disk format touched) to prove the pybind11/MSVC toolchain and the optional-acceleration pattern before attempting anything riskier. See `ROADMAP.md`'s Milestone 10 for what's next (`VersionCore`, integer-interned ids, covering indexes) and what's deliberately still deferred.
+
+### Batch writes (`Database.write_batch()`, M10 Part 3)
+
+`assert_fact`/`retract_fact`/`sync_snapshot` each opened and committed their own LMDB write transaction, so any bulk-ingestion caller (most notably `coredb.restore()`, replaying a `dump()` file) paid one transaction commit per record — the dominant cost at scale (`benchmarks/`'s `ingest.assert_fact`: ~1.9s for 2000 facts). `Database.write_batch()` is a context manager that groups every mutation call made inside it into one transaction: it sets an instance-level `self._batch_txn`, which the three mutation methods check first (each was split into a thin public wrapper plus a `_..._txn(self, t, ...)` helper taking an already-open transaction, so the batched and non-batched paths share one implementation, not two). Not reentrant (LMDB allows only one active write transaction per environment) and not meant for concurrent multi-threaded use within the batch, consistent with "Concurrency" above.
+
+`coredb.restore()` uses `write_batch()` internally, chunked at `_RESTORE_BATCH_SIZE` (5000) records per transaction — not one unbounded transaction for the whole file: LMDB doesn't reclaim space from old MVCC snapshots until a transaction commits, so an arbitrarily large single transaction would make a big restore's map-size growth unbounded too; chunking keeps most of the win (transaction count still drops by ~5000×) while bounding that growth.
+
+Measured: raw `assert_fact` ingest, 2000 facts, one call per transaction vs. all inside one `write_batch()`: 1.94s → 113ms (≈17×). `coredb.restore()` end to end (same 2000-fact dump): ~975ms → 85ms (≈11×, includes the JSON parsing and `dump()`/`assert_fact` overhead the raw ingest benchmark doesn't).
 
 ## Storage management
 

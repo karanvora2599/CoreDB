@@ -16,9 +16,10 @@ DSL executor's job, not the engine's.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 
-from .errors import SchemaVersionError, ValidationError
+from .errors import SchemaVersionError, StorageError, ValidationError
 from .graph_algorithms import betweenness_from_adjacency, pagerank_from_adjacency
 from .model import Assertion, Entity, RelationshipVersion, Source
 from .series import GraphDelta, GraphSeries, date_range
@@ -74,10 +75,31 @@ def _validate_max_depth(max_depth) -> None:
 class Database:
     def __init__(self, store: KVStore):
         self._store = store
+        self._batch_txn = None  # set only inside write_batch() - see below
         self._check_schema_version()
 
     def close(self) -> None:
         self._store.close()
+
+    @contextmanager
+    def write_batch(self):
+        """Groups every assert_fact/retract_fact/sync_snapshot call made
+        inside this `with` block into a single LMDB write transaction,
+        instead of each call committing (and paying LMDB's per-commit
+        cost) on its own - the fix for bulk-ingestion callers like
+        coredb.restore(), previously one transaction per record. Not
+        reentrant (LMDB allows only one active write transaction per
+        environment) and not meant for concurrent use across threads,
+        consistent with the single-writer-transaction model in
+        "Concurrency" (ARCHITECTURE.md)."""
+        if self._batch_txn is not None:
+            raise StorageError("write_batch() is not reentrant - already inside a batch")
+        with self._store.txn(write=True) as t:
+            self._batch_txn = t
+            try:
+                yield self
+            finally:
+                self._batch_txn = None
 
     def _check_schema_version(self) -> None:
         with self._store.txn(write=True) as t:
@@ -241,66 +263,83 @@ class Database:
                      confidence: float | None = None, sources=None) -> int:
         """Open a new interval for (subject, predicate, object_id), or - if
         one is already open - confirm it as of valid_from instead of
-        creating a duplicate. Returns the version_id."""
+        creating a duplicate. Returns the version_id. Runs inside the
+        current write_batch() transaction if one is active, else opens and
+        commits its own (see write_batch())."""
         _validate_identifier("subject", subject)
         _validate_identifier("predicate", predicate)
         _validate_identifier("object_id", object_id)
         _validate_date("valid_from", valid_from)
         now_iso = _utcnow_iso()
+        if self._batch_txn is not None:
+            return self._assert_fact_txn(self._batch_txn, subject, predicate, object_id,
+                                          valid_from, confidence, sources, now_iso)
         with self._store.txn(write=True) as t:
-            rel_id = self._find_or_create_relationship(t, subject, predicate, object_id, now_iso)
-            existing = t.get("open_idx", K.encode_id(rel_id))
-            if existing:
-                vid = K.decode_id(existing)
-                version = self._load_version(t, vid)
-                version.last_confirmed = max(version.last_confirmed, valid_from)
-                if confidence is not None:
-                    version.confidence = confidence
-                new_ids = self._create_assertions(t, rel_id, vid, sources, valid_from, now_iso, confidence)
+            return self._assert_fact_txn(t, subject, predicate, object_id, valid_from, confidence, sources, now_iso)
+
+    def _assert_fact_txn(self, t, subject: str, predicate: str, object_id: str, valid_from: str,
+                          confidence: float | None, sources, now_iso: str) -> int:
+        rel_id = self._find_or_create_relationship(t, subject, predicate, object_id, now_iso)
+        existing = t.get("open_idx", K.encode_id(rel_id))
+        if existing:
+            vid = K.decode_id(existing)
+            version = self._load_version(t, vid)
+            version.last_confirmed = max(version.last_confirmed, valid_from)
+            if confidence is not None:
+                version.confidence = confidence
+            new_ids = self._create_assertions(t, rel_id, vid, sources, valid_from, now_iso, confidence)
+            version.assertion_ids.extend(new_ids)
+            self._store_version(t, version)
+            self._touch_entity(t, subject, valid_from)
+            self._touch_entity(t, object_id, valid_from)
+        else:
+            version = self._open_version(t, subject, predicate, object_id, valid_from, confidence, now_iso)
+            vid = version.version_id
+            new_ids = self._create_assertions(t, rel_id, vid, sources, valid_from, now_iso, confidence)
+            if new_ids:
                 version.assertion_ids.extend(new_ids)
                 self._store_version(t, version)
-                self._touch_entity(t, subject, valid_from)
-                self._touch_entity(t, object_id, valid_from)
-            else:
-                version = self._open_version(t, subject, predicate, object_id, valid_from, confidence, now_iso)
-                vid = version.version_id
-                new_ids = self._create_assertions(t, rel_id, vid, sources, valid_from, now_iso, confidence)
-                if new_ids:
-                    version.assertion_ids.extend(new_ids)
-                    self._store_version(t, version)
-            return vid
+        return vid
 
     def retract_fact(self, subject: str, predicate: str, object_id: str, valid_to: str) -> int | None:
         """Explicitly close the open interval for (subject, predicate, object_id)
-        at valid_to. Returns the version_id closed, or None if nothing was open."""
+        at valid_to. Returns the version_id closed, or None if nothing was
+        open. Runs inside the current write_batch() transaction if one is
+        active, else opens and commits its own (see write_batch())."""
         _validate_identifier("subject", subject)
         _validate_identifier("predicate", predicate)
         _validate_identifier("object_id", object_id)
         _validate_date("valid_to", valid_to)
         now_iso = _utcnow_iso()
+        if self._batch_txn is not None:
+            return self._retract_fact_txn(self._batch_txn, subject, predicate, object_id, valid_to, now_iso)
         with self._store.txn(write=True) as t:
-            key = K.triple_key(subject, predicate, object_id)
-            rel_raw = t.get("relationship_lookup", key)
-            if not rel_raw:
-                return None
-            rel_id = K.decode_id(rel_raw)
-            existing = t.get("open_idx", K.encode_id(rel_id))
-            if not existing:
-                return None
-            vid = K.decode_id(existing)
-            version = self._load_version(t, vid)
-            if valid_to < version.valid_from:
-                raise ValidationError(
-                    f"valid_to ({valid_to!r}) precedes valid_from ({version.valid_from!r}) "
-                    f"for ({subject!r}, {predicate!r}, {object_id!r})"
-                )
-            version.valid_to = valid_to
-            version.system_to = now_iso
-            self._store_version(t, version)
-            t.delete("open_idx", K.encode_id(rel_id))
-            t.delete("open_by_sp_idx", K.open_by_sp_key(subject, predicate, rel_id))
-            t.put("closed_time_idx", K.time_key(valid_to, vid), K.encode_id(vid))
-            return vid
+            return self._retract_fact_txn(t, subject, predicate, object_id, valid_to, now_iso)
+
+    def _retract_fact_txn(self, t, subject: str, predicate: str, object_id: str,
+                           valid_to: str, now_iso: str) -> int | None:
+        key = K.triple_key(subject, predicate, object_id)
+        rel_raw = t.get("relationship_lookup", key)
+        if not rel_raw:
+            return None
+        rel_id = K.decode_id(rel_raw)
+        existing = t.get("open_idx", K.encode_id(rel_id))
+        if not existing:
+            return None
+        vid = K.decode_id(existing)
+        version = self._load_version(t, vid)
+        if valid_to < version.valid_from:
+            raise ValidationError(
+                f"valid_to ({valid_to!r}) precedes valid_from ({version.valid_from!r}) "
+                f"for ({subject!r}, {predicate!r}, {object_id!r})"
+            )
+        version.valid_to = valid_to
+        version.system_to = now_iso
+        self._store_version(t, version)
+        t.delete("open_idx", K.encode_id(rel_id))
+        t.delete("open_by_sp_idx", K.open_by_sp_key(subject, predicate, rel_id))
+        t.put("closed_time_idx", K.time_key(valid_to, vid), K.encode_id(vid))
+        return vid
 
     def sync_snapshot(self, subject: str, predicate: str, objects_now_true: dict,
                        as_of_date: str, sources: dict | None = None) -> dict:
@@ -310,7 +349,9 @@ class Database:
         existing ones, and closing ones no longer present (closed at their
         last_confirmed date, so ingestion gaps don't fabricate false
         closures). `sources`, if given, maps object_id -> list of source
-        dicts/urls, each producing an Assertion for this date."""
+        dicts/urls, each producing an Assertion for this date. Runs inside
+        the current write_batch() transaction if one is active, else opens
+        and commits its own (see write_batch())."""
         _validate_identifier("subject", subject)
         _validate_identifier("predicate", predicate)
         _validate_date("as_of_date", as_of_date)
@@ -318,46 +359,53 @@ class Database:
             _validate_identifier("object_id", obj)
         sources = sources or {}
         now_iso = _utcnow_iso()
-        opened, closed, confirmed = [], [], []
+        if self._batch_txn is not None:
+            return self._sync_snapshot_txn(self._batch_txn, subject, predicate, objects_now_true,
+                                            as_of_date, sources, now_iso)
         with self._store.txn(write=True) as t:
-            currently_open = self._open_objects_for(t, subject, predicate)  # object_id -> (relationship_id, version_id)
+            return self._sync_snapshot_txn(t, subject, predicate, objects_now_true, as_of_date, sources, now_iso)
 
-            for obj, confidence in objects_now_true.items():
-                if obj in currently_open:
-                    rel_id, vid = currently_open[obj]
-                    version = self._load_version(t, vid)
-                    # max(), not a direct assignment: an out-of-chronological-order
-                    # as_of_date must never move last_confirmed backwards below
-                    # valid_from, or a later close would produce an inverted interval.
-                    version.last_confirmed = max(version.last_confirmed, as_of_date)
-                    if confidence is not None:
-                        version.confidence = confidence
-                    new_ids = self._create_assertions(t, rel_id, vid, sources.get(obj), as_of_date, now_iso, confidence)
+    def _sync_snapshot_txn(self, t, subject: str, predicate: str, objects_now_true: dict,
+                            as_of_date: str, sources: dict, now_iso: str) -> dict:
+        opened, closed, confirmed = [], [], []
+        currently_open = self._open_objects_for(t, subject, predicate)  # object_id -> (relationship_id, version_id)
+
+        for obj, confidence in objects_now_true.items():
+            if obj in currently_open:
+                rel_id, vid = currently_open[obj]
+                version = self._load_version(t, vid)
+                # max(), not a direct assignment: an out-of-chronological-order
+                # as_of_date must never move last_confirmed backwards below
+                # valid_from, or a later close would produce an inverted interval.
+                version.last_confirmed = max(version.last_confirmed, as_of_date)
+                if confidence is not None:
+                    version.confidence = confidence
+                new_ids = self._create_assertions(t, rel_id, vid, sources.get(obj), as_of_date, now_iso, confidence)
+                version.assertion_ids.extend(new_ids)
+                self._store_version(t, version)
+                self._touch_entity(t, subject, as_of_date)
+                self._touch_entity(t, obj, as_of_date)
+                confirmed.append(vid)
+            else:
+                version = self._open_version(t, subject, predicate, obj, as_of_date, confidence, now_iso)
+                vid = version.version_id
+                new_ids = self._create_assertions(t, version.relationship_id, vid, sources.get(obj),
+                                                   as_of_date, now_iso, confidence)
+                if new_ids:
                     version.assertion_ids.extend(new_ids)
                     self._store_version(t, version)
-                    self._touch_entity(t, subject, as_of_date)
-                    self._touch_entity(t, obj, as_of_date)
-                    confirmed.append(vid)
-                else:
-                    version = self._open_version(t, subject, predicate, obj, as_of_date, confidence, now_iso)
-                    vid = version.version_id
-                    new_ids = self._create_assertions(t, version.relationship_id, vid, sources.get(obj),
-                                                       as_of_date, now_iso, confidence)
-                    if new_ids:
-                        version.assertion_ids.extend(new_ids)
-                        self._store_version(t, version)
-                    opened.append(vid)
+                opened.append(vid)
 
-            for obj, (rel_id, vid) in currently_open.items():
-                if obj not in objects_now_true:
-                    version = self._load_version(t, vid)
-                    t.delete("open_idx", K.encode_id(rel_id))
-                    t.delete("open_by_sp_idx", K.open_by_sp_key(subject, predicate, rel_id))
-                    t.put("closed_time_idx", K.time_key(version.last_confirmed, vid), K.encode_id(vid))
-                    version.valid_to = version.last_confirmed
-                    version.system_to = now_iso
-                    self._store_version(t, version)
-                    closed.append(vid)
+        for obj, (rel_id, vid) in currently_open.items():
+            if obj not in objects_now_true:
+                version = self._load_version(t, vid)
+                t.delete("open_idx", K.encode_id(rel_id))
+                t.delete("open_by_sp_idx", K.open_by_sp_key(subject, predicate, rel_id))
+                t.put("closed_time_idx", K.time_key(version.last_confirmed, vid), K.encode_id(vid))
+                version.valid_to = version.last_confirmed
+                version.system_to = now_iso
+                self._store_version(t, version)
+                closed.append(vid)
 
         return {"opened": opened, "closed": closed, "confirmed": confirmed}
 

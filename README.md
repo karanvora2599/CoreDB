@@ -50,6 +50,12 @@ db.retract_fact("NVIDIA", "SUPPLIED_BY", "TSMC", valid_to="2026-06-01")
 # present. Useful for periodic ingestion (e.g. one call per day).
 db.sync_snapshot("NVIDIA", "CO_OCCURS_WITH", {"AI": 5, "Google": 2}, as_of_date="2026-01-01")
 
+# Bulk ingestion: group many mutations into one LMDB transaction instead of
+# one per call (coredb.restore() uses this internally).
+with db.write_batch():
+    for subject, predicate, obj, date in bulk_facts:
+        db.assert_fact(subject, predicate, obj, date)
+
 # Query and write via TGQL - patterns are (subject, predicate, object) with
 # `?var` wildcards; ASSERT/RETRACT are the write statements.
 db.execute("ASSERT (NVIDIA, SUPPLIED_BY, Samsung) VALID FROM '2026-02-01' CONFIDENCE 0.6")
