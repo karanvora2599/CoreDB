@@ -12,6 +12,15 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+try:
+    from . import _native
+except ImportError:
+    # No C++ toolchain at build time, or a pure-Python-only install -
+    # detect_changepoints() below falls back to the pure-Python path
+    # transparently. Optional acceleration, not a hard dependency - see
+    # Documentation/ARCHITECTURE.md's Performance section.
+    _native = None
+
 
 def _segment_cost(values: list[float], start: int, end: int) -> float:
     """Residual sum of squared deviations from the mean, for values[start:end]."""
@@ -39,8 +48,30 @@ def _best_split(values: list[float], start: int, end: int, min_size: int):
     return best_split, best_gain
 
 
+def _detect_changepoints_indices_python(values: list[float], min_size: int, penalty: float) -> list[int]:
+    """Pure-Python index-space search - identical algorithm to the native
+    coredb._native.detect_changepoints_indices, kept as the fallback (and
+    as the correctness oracle in tests/test_native_segmentation.py)."""
+    n = len(values)
+    changepoints = []
+    if n < 2 * min_size:
+        return changepoints
+    stack: list[tuple[int, int]] = [(0, n)]
+    while stack:
+        start, end = stack.pop()
+        if end - start < 2 * min_size:
+            continue
+        split, gain = _best_split(values, start, end, min_size)
+        if split is None or gain <= penalty:
+            continue
+        changepoints.append(split)
+        stack.append((start, split))
+        stack.append((split, end))
+    return sorted(changepoints)
+
+
 def detect_changepoints(points: list[tuple[str, float | None]], min_size: int = 2,
-                         penalty: float | None = None) -> list[str]:
+                         penalty: float | None = None, use_native: bool | None = None) -> list[str]:
     """Binary segmentation change-point detection (mean-shift, residual-
     sum-of-squares cost) over a GraphSignal's points - the basis of tools
     like `ruptures`' Binseg, not an ad hoc heuristic. Recursively finds the
@@ -52,6 +83,13 @@ def detect_changepoints(points: list[tuple[str, float | None]], min_size: int = 
     `penalty` defaults to a standard BIC-style heuristic
     (`variance(values) * log(n)`) if not given; pass an explicit value to
     tune sensitivity (lower = more changepoints).
+
+    The actual index-space search runs in coredb._native (a compiled
+    pybind11 extension, a literal port of the same algorithm - not an
+    approximation) when it's available, falling back to pure Python
+    transparently otherwise; both produce identical results. `use_native`
+    forces one path or the other (for tests/benchmarks comparing them
+    directly) - leave it None to auto-detect.
 
     Returns the dates where a new regime starts, chronologically sorted.
     """
@@ -67,20 +105,15 @@ def detect_changepoints(points: list[tuple[str, float | None]], min_size: int = 
         variance = sum((x - mean) ** 2 for x in values) / n
         penalty = variance * math.log(n) if variance > 0 else 0.0
 
-    changepoints = []
-    stack: list[tuple[int, int]] = [(0, n)]
-    while stack:
-        start, end = stack.pop()
-        if end - start < 2 * min_size:
-            continue
-        split, gain = _best_split(values, start, end, min_size)
-        if split is None or gain <= penalty:
-            continue
-        changepoints.append(split)
-        stack.append((start, split))
-        stack.append((split, end))
+    run_native = _native is not None if use_native is None else use_native
+    if run_native:
+        if _native is None:
+            raise RuntimeError("use_native=True requested but coredb._native is not built")
+        indices = _native.detect_changepoints_indices(values, min_size, penalty)
+    else:
+        indices = _detect_changepoints_indices_python(values, min_size, penalty)
 
-    return sorted(dates[i] for i in changepoints)
+    return sorted(dates[i] for i in indices)
 
 
 @dataclass

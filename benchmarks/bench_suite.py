@@ -8,6 +8,8 @@ which are what the interval-sweep rewrite targets.
 """
 from __future__ import annotations
 
+import coredb.signal as signal_mod
+
 from .datasets import seed_churn_history, seed_entity_churn, seed_random_graph
 from .harness import bench, temp_db
 
@@ -115,6 +117,37 @@ def bench_changepoints(quick: bool):
                       note=f"H={n_cycles} relationships, D~{n_steps} steps")
 
 
+def _synthetic_signal_points(n: int):
+    """A signal with real regime shifts every ~n/6 points, not noise -
+    exercises the segmentation search's actual split-finding work rather
+    than short-circuiting on an all-flat or trivial signal."""
+    points = []
+    for i in range(n):
+        regime = (i * 6) // n
+        value = float(regime * 7 + (i % 3))
+        points.append((f"2020-{1 + i // 28:02d}-{1 + i % 28:02d}", value))
+    return points
+
+
+def bench_segmentation_python(quick: bool):
+    """Isolates JUST the binary-segmentation search cost (not track()'s,
+    already fixed in M9) - the native pilot's actual target. See
+    bench_segmentation_native for the same signal through coredb._native."""
+    n = 120 if quick else 365
+    points = _synthetic_signal_points(n)
+    return bench("segmentation.python", n,
+                  lambda: signal_mod.detect_changepoints(points, use_native=False))
+
+
+def bench_segmentation_native(quick: bool):
+    n = 120 if quick else 365
+    points = _synthetic_signal_points(n)
+    if signal_mod._native is None:
+        return bench("segmentation.native (not built)", n, lambda: None)
+    return bench("segmentation.native", n,
+                  lambda: signal_mod.detect_changepoints(points, use_native=True))
+
+
 def bench_why_changed(quick: bool):
     n_cycles = 20 if quick else 100
     with temp_db() as db:
@@ -155,6 +188,8 @@ BENCHMARKS = [
     bench_series_snapshot,
     bench_path_exists,
     bench_changepoints,
+    bench_segmentation_python,
+    bench_segmentation_native,
     bench_why_changed,
     bench_dump_restore,
 ]
