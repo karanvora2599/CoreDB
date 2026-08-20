@@ -122,3 +122,13 @@ class WhyChangedQuery:
     pattern: Pattern
     date_from: str
     date_to: str
+
+
+@dataclass
+class ChangepointsQuery:
+    metric: str
+    target: str | tuple
+    start: str
+    end: str
+    resolution_days: int = 1
+    max_depth: int = 4

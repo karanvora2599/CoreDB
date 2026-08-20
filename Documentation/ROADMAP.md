@@ -61,9 +61,15 @@ Provenance, built on the `Assertion`/`Source` chain the data model has captured 
 - **`Database.why_changed(subject, predicate, object_id, date_from, date_to)`** — combines `diff()`'s interval-level classification (`"opened"`/`"closed"`/`"churned"`/`"persisted"`/`"no_relationship"`, `"churned"` being new — both opened and closed within the window) with the evidence trail: every assertion across this triple's history whose `event_time` (valid time, not `ingested_at`/system time) falls in the window, resolved to its `Source` via a new `_load_source` full-scan primitive.
 - **TGQL v0.6**: `WHY_CHANGED (...) BETWEEN ... AND ...`, reusing the `pattern` grammar (fully literal, like `ASSERT`/`RETRACT`).
 
-"The full architecture" (complete the evolution algebra, embedded-library scope) has one milestone left:
+## Milestone 8 — done
 
-1. **Change-point detection** — a native `CHANGEPOINTS` operator over a `GraphSignal`, instead of requiring a separate offline ML job.
+Change-point detection, closing out "the full architecture" (complete the evolution algebra, embedded-library scope).
+
+- **`coredb/signal.py`: `detect_changepoints(points, min_size=2, penalty=None)`** — binary segmentation with a residual-sum-of-squares cost function, the basis of tools like `ruptures`' `Binseg`, not an ad hoc heuristic. Recursively finds the split that most reduces total cost, keeps it only if the gain exceeds `penalty` (defaults to a standard BIC-style heuristic, `variance(values) * log(n)`), and recurses into both halves. `None`-valued points (e.g. `EDGE_WEIGHT` gaps) are dropped first as "no data," not a real zero.
+- **`GraphSignal.changepoints(...)`** — thin wrapper; **`Database.changepoints(metric, target, start, end, ...)`** — `track()` + `.changepoints()` combined, the path most callers want.
+- **TGQL v0.7**: `CHANGEPOINTS <METRIC>(<args>) BETWEEN ... AND ... [RESOLUTION '<N>d'] [MAX_DEPTH <n>]` — same metric registry and arity checking as `TRACK`; the shared "metric call" grammar/parsing (`metric_call` rule) was factored out of `track_stmt` into something both `TRACK` and `CHANGEPOINTS` reuse, rather than duplicating the identifier/string/max-depth bucketing logic a second time.
+
+**This closes the four-milestone "complete the evolution algebra" arc** (M5 traversal → M6 centrality → M7 provenance → M8 change-point detection), all as an embedded library per the locked-in scope. What's left is everything in "Explicitly deferred" below — real ideas, but outside that scope (a bigger grammar undertaking, a genuinely different deployment model, or infrastructure work like an optimizer/benchmark suite).
 
 ## Explicitly deferred (not built yet)
 
@@ -75,11 +81,13 @@ These come from a broader architectural vision shared during design discussion, 
 - **Query optimizer** — right now every query method picks its own access path in Python (bound subject → `spo_idx`, bound object → `ops_idx`, neither → full scan; BFS has no traversal-specific index either). A real operator tree with cost-based planning is future work, not attempted yet.
 - **Server / wire protocol / PostgreSQL** — CoreDB stays an embedded library. A client-server mode is a deliberate non-goal until multi-process/multi-user access is actually needed.
 - **Automatic map-size growth and multi-process write coordination** — `MapFullError` is caught and explained (M3), but growing the map automatically would require safely replaying an arbitrary caller-supplied transaction, which isn't generalizable; multi-process writers are untested.
-- **`WHERE` beyond `confidence`, and on `DIFF`/`RANGE`/`SERIES`/`TRACK`/`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`/`WHY_CHANGED`** — see `TGQL_SPEC.md`'s "Not yet supported" section.
+- **`WHERE` beyond `confidence`, and on `DIFF`/`RANGE`/`SERIES`/`TRACK`/`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`/`WHY_CHANGED`/`CHANGEPOINTS`** — see `TGQL_SPEC.md`'s "Not yet supported" section.
 - **`assertions_for_version()` from TGQL** — version ids are internal; `WHY_CHANGED` is the entity/triple-oriented surface for provenance.
 - **`ASSERT ... SOURCE '<url>'`** — provenance attachment from TGQL; sources remain Python-API-only for now.
 - **`GraphSignal.join()` from TGQL** — joining a `TRACK` signal against external data needs caller-supplied data, so it stays Python-API-only, same reasoning as `ASSERT ... SOURCE`.
-- **Benchmark suite** — a dedicated benchmark (`GraphTSBench`-style: `AS_OF`, bitemporal reconstruction, `HISTORY`, `DIFF`, `TRACK`, `PATH`, change-point, provenance, cross-modal joins) to measure latency/storage/reconstruction cost as the engine matures.
+- **`min_size`/`penalty` tuning for `CHANGEPOINTS` from TGQL** — sensitivity tuning is Python-API-only (`db.changepoints(..., min_size=..., penalty=...)`); TGQL always uses the auto-computed default.
+- **Change-point detection over `GraphSeries` directly** (structural regime shifts, not just a numeric metric's) — M8 only detects changepoints in a `GraphSignal` (a metric already reduced to numbers); detecting structural change in the graph itself, without picking a metric first, is a different and harder problem, not attempted.
+- **Benchmark suite** — a dedicated benchmark (`GraphTSBench`-style: `AS_OF`, bitemporal reconstruction, `HISTORY`, `DIFF`, `TRACK`, `PATH`, `WHY_CHANGED`, `CHANGEPOINTS`, cross-modal joins) to measure latency/storage/reconstruction cost as the engine matures.
 
 ## Known limitations to revisit as scale increases
 

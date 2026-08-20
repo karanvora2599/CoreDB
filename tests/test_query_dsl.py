@@ -2,8 +2,8 @@ import pytest
 
 import coredb
 from coredb.query.ast_nodes import (
-    AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery, PathHistoryQuery,
-    PathQuery, RangeQuery, RetractStatement, SeriesQuery, TrackQuery, WhyChangedQuery,
+    AssertStatement, ChangepointsQuery, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery,
+    PathHistoryQuery, PathQuery, RangeQuery, RetractStatement, SeriesQuery, TrackQuery, WhyChangedQuery,
 )
 from coredb.query.parser import parse
 
@@ -184,6 +184,29 @@ def test_parse_why_changed():
     assert ast.date_from == "2026-01-01" and ast.date_to == "2026-06-01"
 
 
+def test_parse_changepoints():
+    ast = parse("CHANGEPOINTS DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-12-31'")
+    assert isinstance(ast, ChangepointsQuery)
+    assert ast.metric == "degree"
+    assert ast.target == "NVIDIA"
+    assert ast.resolution_days == 1
+    assert ast.max_depth == 4
+
+    ast2 = parse(
+        "CHANGEPOINTS CLOSENESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-12-31' RESOLUTION '7d' MAX_DEPTH 3"
+    )
+    assert ast2.metric == "closeness"
+    assert ast2.resolution_days == 7
+    assert ast2.max_depth == 3
+
+
+def test_parse_changepoints_rejects_unknown_metric_and_wrong_arity():
+    with pytest.raises(coredb.QueryError):
+        parse("CHANGEPOINTS EIGENVECTOR_CENTRALITY(NVIDIA) BETWEEN '2026-01-01' AND '2026-12-31'")
+    with pytest.raises(coredb.QueryError):
+        parse("CHANGEPOINTS DEGREE(NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-12-31'")
+
+
 def test_executor_match_matches_direct_engine_call(db):
     db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01")
     direct = db.as_of(("NVIDIA", "SUPPLIED_BY", None), "2026-01-05")
@@ -334,3 +357,14 @@ def test_executor_why_changed_matches_direct_engine_call(db):
 def test_executor_why_changed_rejects_variable_pattern(db):
     with pytest.raises(coredb.ValidationError):
         db.execute("WHY_CHANGED (NVIDIA, ?p, TSMC) BETWEEN '2026-01-01' AND '2026-06-01'")
+
+
+def test_executor_changepoints_matches_direct_engine_call(db):
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1}, "2026-01-01")
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1}, "2026-01-08")
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1, "P2": 1, "P3": 1, "P4": 1, "P5": 1}, "2026-01-15")
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1, "P2": 1, "P3": 1, "P4": 1, "P5": 1}, "2026-01-22")
+
+    direct = db.changepoints("degree", "NVIDIA", "2026-01-01", "2026-01-22", resolution_days=7)
+    result = db.execute("CHANGEPOINTS DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-01-22' RESOLUTION '7d'")
+    assert result == {"changepoints": direct} == {"changepoints": ["2026-01-15"]}

@@ -15,7 +15,8 @@ This project generalizes a pattern first proven in [`Knowledge_Graph`](../Knowle
 - **Milestone 5** (done): TGQL v0.4 (`PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`), point-to-point multi-hop traversal between two named entities via bounded BFS.
 - **Milestone 6** (done): TGQL v0.5 (`TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK`), centrality metrics built on M5's traversal — closeness is harmonic (handles a disconnected/depth-bounded graph honestly), betweenness/PageRank are exposed both per-entity and as whole-graph `_all` variants since they're inherently global computations.
 - **Milestone 7** (done): TGQL v0.6 (`WHY_CHANGED`), tracing what changed about a relationship and which `Assertion`/`Source` evidence is responsible — the provenance chain the data model has captured since M2, finally with a query surface.
-- "Full architecture" = completing the evolution algebra as an embedded library: one milestone left — change-point detection. See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deferred outside this scope (general multi-hop pattern matching, streaming, a server mode).
+- **Milestone 8** (done): TGQL v0.7 (`CHANGEPOINTS`), binary-segmentation change-point detection over any `TRACK`-able metric — this closes out "the full architecture" (M5 traversal → M6 centrality → M7 provenance → M8 change-point detection), all as an embedded library, per the scope locked in at the start of that arc.
+- See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deliberately deferred beyond that scope (general multi-hop pattern matching, streaming, a server mode, a query optimizer, a benchmark suite).
 
 ## Install
 
@@ -72,6 +73,9 @@ db.betweenness_all("2026-01-10")   # whole-graph score, cheaper than looping per
 
 # Provenance: what changed, and which evidence is responsible.
 db.execute("WHY_CHANGED (NVIDIA, SUPPLIED_BY, Samsung) BETWEEN '2026-01-01' AND '2026-06-01'")
+
+# Change-point detection over any TRACK-able metric.
+db.execute("CHANGEPOINTS DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-12-31' RESOLUTION '7d'")
 
 # Storage management.
 db.stats()               # entry counts per table

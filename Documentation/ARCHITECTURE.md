@@ -9,14 +9,14 @@ coredb/
 ├── errors.py                # CoreDBError, ValidationError, StorageError, SchemaVersionError, QueryError
 ├── engine.py                # Database: mutation + query + storage-management methods
 ├── series.py                # GraphSeries (lazy interval view), GraphDelta (structured diff), date_range()
-├── signal.py                # GraphSignal (metric evaluated across time, joinable against external data)
+├── signal.py                # GraphSignal (metric evaluated across time, joinable against external data), detect_changepoints() (binary segmentation)
 ├── storage/
 │   ├── kvstore.py           # KVStore/Transaction interface - engine.py never talks to LMDB directly
 │   ├── lmdb_backend.py       # LMDB implementation of KVStore
 │   └── keys.py               # composite key encoding for LMDB's sorted byte-string keys
 └── query/
     ├── grammar.lark          # Lark grammar for TGQL (coredb/query language)
-    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery (degree/closeness/betweenness/pagerank/...), PathQuery, FirstConnectedQuery, PathHistoryQuery, WhyChangedQuery
+    ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery/ChangepointsQuery (degree/closeness/betweenness/pagerank/...), PathQuery, FirstConnectedQuery, PathHistoryQuery, WhyChangedQuery
     ├── parser.py              # Lark parse tree -> AST
     └── executor.py            # AST -> engine.py calls -> plain dict/list[dict] results
 ```
@@ -73,6 +73,10 @@ Cost scales with branching factor (average degree) to the power of `max_depth`, 
 ## Provenance
 
 `WHY_CHANGED` (TGQL v0.6) walks the `Assertion`/`Source` chain the data model has captured since M2 but had no query surface for until now. `_load_source(t, source_id)` is a full scan of the `sources` table (keyed by `url` for `_find_or_create_source`'s dedup, not by `source_id`) — a one-off provenance lookup, not a hot path, the same tradeoff as `_active_entity_ids`/`diff()`'s global branch. `why_changed()`'s evidence-window filter uses each `Assertion`'s `event_time` (the valid-time date its claim pertains to — always equal to the `valid_from`/`as_of_date` passed to `assert_fact`/`sync_snapshot` at creation), not `ingested_at` (system time, when the assertion was recorded) — this keeps the evidence trail aligned with the `status` field, which is a valid-time classification via `diff()`.
+
+## Change-point detection
+
+`CHANGEPOINTS` (TGQL v0.7) is `TRACK` plus `coredb/signal.py`'s `detect_changepoints()`: binary segmentation with a residual-sum-of-squares cost function, recursively splitting a signal's points wherever the split reduces total cost by more than a penalty (a standard BIC-style default, `variance(values) * log(n)`, unless the caller overrides it). Cost is `O(n)` per candidate split point and there are `O(n)` candidates per segment, so one segmentation pass is `O(n^2)` in the worst case over `n` = the signal's point count — fine for the resolution-bounded series `TRACK`/`CHANGEPOINTS` actually produce (dozens to low hundreds of points, not the underlying graph's full history), but not something to run over an unbounded/very-fine-resolution series without expecting it to scale accordingly. No new engine-level state: `changepoints()` is exactly `track()` followed by `GraphSignal.changepoints()`, so it inherits `TRACK`'s own costs (including `BETWEENNESS`/`PAGERANK`'s per-step full-graph recomputation, above) on top of the segmentation itself.
 
 ## Storage management
 

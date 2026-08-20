@@ -6,8 +6,8 @@ import operator
 
 from ..errors import ValidationError
 from .ast_nodes import (
-    AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery,
-    PathHistoryQuery, PathQuery, Pattern, RangeQuery, RetractStatement,
+    AssertStatement, ChangepointsQuery, DiffQuery, FirstConnectedQuery, HistoryQuery,
+    MatchQuery, PathHistoryQuery, PathQuery, Pattern, RangeQuery, RetractStatement,
     SeriesQuery, TrackQuery, WhereClause, WhyChangedQuery,
 )
 
@@ -128,5 +128,10 @@ def execute(db, ast) -> list[dict] | dict:
     if isinstance(ast, WhyChangedQuery):
         subject, predicate, obj = _require_literal_pattern(ast.pattern)
         return db.why_changed(subject, predicate, obj, ast.date_from, ast.date_to)
+
+    if isinstance(ast, ChangepointsQuery):
+        dates = db.changepoints(ast.metric, ast.target, ast.start, ast.end,
+                                 ast.resolution_days, max_depth=ast.max_depth)
+        return {"changepoints": dates}
 
     raise TypeError(f"unknown AST node: {ast!r}")

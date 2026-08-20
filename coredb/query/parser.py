@@ -8,8 +8,8 @@ from lark.exceptions import LarkError, VisitError
 
 from ..errors import CoreDBError, QueryError
 from .ast_nodes import (
-    AssertStatement, DiffQuery, FirstConnectedQuery, HistoryQuery, MatchQuery,
-    PathHistoryQuery, PathQuery, RangeQuery, RetractStatement, SeriesQuery,
+    AssertStatement, ChangepointsQuery, DiffQuery, FirstConnectedQuery, HistoryQuery,
+    MatchQuery, PathHistoryQuery, PathQuery, RangeQuery, RetractStatement, SeriesQuery,
     Term, TrackQuery, WhereClause, WhyChangedQuery,
 )
 
@@ -115,7 +115,12 @@ class _ASTBuilder(Transformer):
         valid_to = _unquote(children[1])
         return RetractStatement(pattern=pattern, valid_to=valid_to)
 
-    def track_stmt(self, children):
+    def metric_call(self, children):
+        """Shared by TRACK and CHANGEPOINTS - both take the same
+        <METRIC>(<args>) BETWEEN ... AND ... [RESOLUTION ...] [MAX_DEPTH ...]
+        shape against the same metric registry. Returns a plain tuple
+        rather than an AST node since the two statements wrap it into
+        different query types."""
         identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]
         strings = [c for c in children if getattr(c, "type", None) == "STRING"]
         max_depths = [c for c in children if isinstance(c, int)]
@@ -124,21 +129,28 @@ class _ASTBuilder(Transformer):
 
         arity = _METRIC_ARITY.get(metric)
         if arity is None:
-            raise QueryError(
-                f"unknown TRACK metric {metric!r} - expected one of {sorted(_METRIC_ARITY)}"
-            )
+            raise QueryError(f"unknown metric {metric!r} - expected one of {sorted(_METRIC_ARITY)}")
         if len(target_args) != arity:
-            raise QueryError(
-                f"TRACK {metric.upper()} takes {arity} argument(s), got {len(target_args)}"
-            )
+            raise QueryError(f"{metric.upper()} takes {arity} argument(s), got {len(target_args)}")
         target = str(target_args[0]) if arity == 1 else tuple(str(a) for a in target_args)
 
         start = _unquote(strings[0])
         end = _unquote(strings[1])
         resolution_days = _parse_resolution(strings[2]) if len(strings) > 2 else 1
         max_depth = max_depths[0] if max_depths else 4
+        return metric, target, start, end, resolution_days, max_depth
+
+    def track_stmt(self, children):
+        (call,) = children
+        metric, target, start, end, resolution_days, max_depth = call
         return TrackQuery(metric=metric, target=target, start=start, end=end,
                            resolution_days=resolution_days, max_depth=max_depth)
+
+    def changepoints_stmt(self, children):
+        (call,) = children
+        metric, target, start, end, resolution_days, max_depth = call
+        return ChangepointsQuery(metric=metric, target=target, start=start, end=end,
+                                  resolution_days=resolution_days, max_depth=max_depth)
 
     def path_stmt(self, children):
         identifiers = [c for c in children if getattr(c, "type", None) == "IDENTIFIER"]

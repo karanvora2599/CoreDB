@@ -536,3 +536,14 @@ def test_why_changed_with_no_sources_given_has_no_provenance(db):
     db.assert_fact("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", confidence=0.6)
     result = db.why_changed("NVIDIA", "SUPPLIED_BY", "TSMC", "2026-01-01", "2026-06-01")
     assert result["assertions"] == []
+
+
+def test_database_changepoints_matches_track_then_changepoints(db):
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1}, "2026-01-01")
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1}, "2026-01-08")
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1, "P2": 1, "P3": 1, "P4": 1, "P5": 1}, "2026-01-15")
+    db.sync_snapshot("NVIDIA", "PARTNER_OF", {"P1": 1, "P2": 1, "P3": 1, "P4": 1, "P5": 1}, "2026-01-22")
+
+    direct = db.track("degree", "NVIDIA", "2026-01-01", "2026-01-22", resolution_days=7).changepoints()
+    via_method = db.changepoints("degree", "NVIDIA", "2026-01-01", "2026-01-22", resolution_days=7)
+    assert via_method == direct == ["2026-01-15"]

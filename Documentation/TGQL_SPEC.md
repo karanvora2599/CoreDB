@@ -200,17 +200,35 @@ WHY_CHANGED (NVIDIA, SUPPLIED_BY, TSMC) BETWEEN '2026-01-01' AND '2026-06-01'
 
 `status` mirrors `DIFF`'s classification (`"churned"` is new here: both opened and closed within the window — closed then reopened). `assertions` is every piece of evidence across this triple's full history (via `Database.assertions_for_version()`) whose `event_time` — the valid-time date each assertion's claim pertains to, **not** `ingested_at` (when the system recorded it) — falls in `[date_from, date_to]`, so the evidence trail lines up with `status`'s valid-time classification instead of when the data happened to arrive.
 
+## TGQL v0.7 (change-point detection)
+
+### `CHANGEPOINTS <METRIC>(<args>) BETWEEN '<date>' AND '<date>' [RESOLUTION '<N>d'] [MAX_DEPTH <n>]`
+
+`TRACK`s `<METRIC>` across the interval, then detects the dates where its value undergoes a significant mean shift — binary segmentation with a residual-sum-of-squares cost function (the basis of tools like `ruptures`' `Binseg`, not an ad hoc heuristic; see `Database.changepoints()`/`coredb/signal.py`'s `detect_changepoints()`). Same metric registry, arity checking, and `MAX_DEPTH` semantics as `TRACK` (see that section's table) — any metric `TRACK` supports, `CHANGEPOINTS` supports too.
+
+```
+CHANGEPOINTS DEGREE(NVIDIA) BETWEEN '2026-01-01' AND '2026-12-31'
+CHANGEPOINTS CLOSENESS(NVIDIA) BETWEEN '2026-01-01' AND '2026-12-31' RESOLUTION '7d' MAX_DEPTH 3
+```
+
+An unknown metric name or wrong argument count raises `coredb.QueryError`, same as `TRACK`.
+
+**Result:** `{"changepoints": [<date>, ...]}` — the dates where a new regime starts.
+
+`None`-valued points (e.g. from `EDGE_WEIGHT` when a relationship isn't open) are dropped before detection — that's "no data," not a real zero. The detection sensitivity (`min_size`/`penalty` in `detect_changepoints()`) is tunable Python-API-only (`db.changepoints(..., min_size=2, penalty=None)`); `CHANGEPOINTS` in TGQL always uses the defaults — a standard BIC-style penalty (`variance(values) * log(n)`) computed from the series itself, same reasoning as `PAGERANK`'s damping staying Python-API-only.
+
 ## Not yet supported
 
 These are deliberately out of scope so far — see `Documentation/ROADMAP.md` for the fuller picture of what's deferred and why:
 
 - **General multi-hop pattern matching** inside `MATCH`/`HISTORY` (`(a)-[]->(b)-[]->(c)` chains with wildcards at each hop) — v0.4's `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY` are point-to-point queries between two named entities, not a path-pattern grammar.
-- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, `TRACK`, `PATH`, `FIRST_CONNECTED`, `PATH_HISTORY`, or `WHY_CHANGED` — only `MATCH`/`HISTORY` support them.
+- `WHERE`/`LIMIT` on `DIFF`, `RANGE`, `SERIES`, `TRACK`, `PATH`, `FIRST_CONNECTED`, `PATH_HISTORY`, `WHY_CHANGED`, or `CHANGEPOINTS` — only `MATCH`/`HISTORY` support them.
 - `WHERE` on any field other than `confidence` — no query planner support yet for filtering on `properties` or other fields.
 - `ASSERT ... SOURCE '<url>'` — attaching provenance from the DSL. Sources are still Python-API-only (`sources=[...]` on `assert_fact`/`sync_snapshot`).
 - `GraphSignal.join()` from TGQL — see the `TRACK` section above.
 - `betweenness_all()`/`pagerank_all()` from TGQL — `TRACK` is per-entity by design; the full-graph dict result doesn't fit its shape. Python-API-only for now.
 - `assertions_for_version()` from TGQL — version ids are internal, not something TGQL users type by hand; `WHY_CHANGED` is the entity/triple-oriented surface for this.
+- `min_size`/`penalty` tuning for `CHANGEPOINTS` from TGQL — see above.
 - `ORDER BY` — `HISTORY` is always chronological; there's no way to sort `MATCH` results yet.
 
 ## Version history
@@ -221,3 +239,4 @@ These are deliberately out of scope so far — see `Documentation/ROADMAP.md` fo
 - **v0.4** — `PATH`/`FIRST_CONNECTED`/`PATH_HISTORY`, point-to-point multi-hop traversal via bounded BFS.
 - **v0.5** — `TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK`, centrality metrics built on v0.4's traversal.
 - **v0.6** — `WHY_CHANGED`, walking the `Assertion`/`Source` provenance chain the data model has captured since M2.
+- **v0.7** — `CHANGEPOINTS`, binary-segmentation change-point detection over any `TRACK`-able metric. This closes out "the full architecture" (the evolution algebra, embedded-library scope).

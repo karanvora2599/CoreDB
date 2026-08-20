@@ -561,6 +561,14 @@ class Database:
         points = [(d, fn(d)) for d in date_range(start, end, resolution_days)]
         return GraphSignal(metric=metric, target=target, points=points)
 
+    def changepoints(self, metric: str, target, start: str, end: str, resolution_days: int = 1,
+                      max_depth: int = 4, min_size: int = 2, penalty: float | None = None) -> list[str]:
+        """track()s `metric` across [start, end] and returns the dates
+        where its value undergoes a significant mean shift (binary
+        segmentation - see coredb/signal.py's detect_changepoints)."""
+        signal = self.track(metric, target, start, end, resolution_days, max_depth=max_depth)
+        return signal.changepoints(min_size=min_size, penalty=penalty)
+
     # ------------------------------------------------------------------
     # Multi-hop traversal - point-to-point path queries between two named
     # entities, via BFS over _neighbor_versions. Not general multi-hop
