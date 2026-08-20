@@ -67,7 +67,8 @@ class GraphSeries:
 
     def __iter__(self):
         """Yield (date, snapshot) pairs at `resolution_days` steps across
-        [start, end] - each snapshot is resolved lazily via as_of() at
-        iteration time, not precomputed."""
-        for d in self.dates():
-            yield d, self.at(d)
+        [start, end] - computed by the db in one interval sweep
+        (Database.series_snapshots, O(H + D)) rather than one as_of() call
+        per date. Still just a duck-typed db call, same as `at()` below -
+        no new dependency on engine.py."""
+        yield from self._db.series_snapshots(self.pattern, self.start, self.end, self.resolution_days)

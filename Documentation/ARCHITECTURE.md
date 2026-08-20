@@ -19,6 +19,12 @@ coredb/
     ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery/ChangepointsQuery (degree/closeness/betweenness/pagerank/...), PathQuery, FirstConnectedQuery, PathHistoryQuery, WhyChangedQuery
     ├── parser.py              # Lark parse tree -> AST
     └── executor.py            # AST -> engine.py calls -> plain dict/list[dict] results
+
+benchmarks/                     # GraphTSBench - not part of the coredb package, see "Performance" below
+├── harness.py                 # BenchResult, temp_db(), bench(), print_report()
+├── datasets.py                 # synthetic graph/churn-history generators
+├── bench_suite.py              # the benchmark definitions
+└── run_all.py                  # CLI entrypoint: python -m benchmarks.run_all [--quick]
 ```
 
 `engine.py` is the only module that talks to `storage/`. `query/` never imports `engine.py` — `Database.execute()` imports `query.parser`/`query.executor` lazily, so the dependency only goes one direction (engine → query at call time, never query → engine at import time). This is why `engine.py` can freely import `GraphDelta`/`GraphSeries` from `series.py` (and `GraphSignal` from `signal.py`) without a circular import: neither module imports `engine.py` — the `db` each one holds is duck-typed.
@@ -77,6 +83,15 @@ Cost scales with branching factor (average degree) to the power of `max_depth`, 
 ## Change-point detection
 
 `CHANGEPOINTS` (TGQL v0.7) is `TRACK` plus `coredb/signal.py`'s `detect_changepoints()`: binary segmentation with a residual-sum-of-squares cost function, recursively splitting a signal's points wherever the split reduces total cost by more than a penalty (a standard BIC-style default, `variance(values) * log(n)`, unless the caller overrides it). Cost is `O(n)` per candidate split point and there are `O(n)` candidates per segment, so one segmentation pass is `O(n^2)` in the worst case over `n` = the signal's point count — fine for the resolution-bounded series `TRACK`/`CHANGEPOINTS` actually produce (dozens to low hundreds of points, not the underlying graph's full history), but not something to run over an unbounded/very-fine-resolution series without expecting it to scale accordingly. No new engine-level state: `changepoints()` is exactly `track()` followed by `GraphSignal.changepoints()`, so it inherits `TRACK`'s own costs (including `BETWEENNESS`/`PAGERANK`'s per-step full-graph recomputation, above) on top of the segmentation itself.
+
+## Performance
+
+`benchmarks/` (`GraphTSBench`, `python -m benchmarks.run_all [--quick]`) is the suite that gates optimization work — a change is only kept if the numbers actually improve, not on intuition. It prompted (and then measured) one real fix so far:
+
+- **`TRACK DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT` and `SERIES` iteration are O(H + D)**, not O(D × H) (H = a pattern's/entity's total history depth, D = the number of resolution steps). The old implementation called `degree()`/`edge_weight()`/`as_of()` fresh at every step, each an O(H) scan. `engine.py`'s `_degree_track_points`/`_edge_weight_track_points`/`series_snapshots` instead fetch the full history once, turn each interval into an open/close event at its `valid_from`/day-after-`valid_to`, sort, and sweep a running total (degree family) or active-version set (`SERIES`) forward across the requested dates in one pass. Measured on the benchmark's default sizes (H=150 relationships, D=365 daily steps): `TRACK DEGREE` 6.09s → 28ms, `TRACK EDGE_WEIGHT` 6.03s → 6.5ms, `SERIES` iteration 6.33s → 9.6ms. The old single-date methods (`degree()`, `edge_weight()`, `as_of()`) are unchanged and serve as the correctness oracle for `tests/test_track_series_sweep.py`.
+  - **Same-day boundary case**: a `retract_fact(valid_to=d)` immediately followed by `assert_fact(valid_from=d)` on the same triple produces two versions whose valid-time intervals both cover `d` (`valid_to` is inclusive), even though they were never simultaneously open in system time. The old per-date dedup resolved this via list/dict iteration order — not a meaningful guarantee. The sweep resolves it deterministically (most-recently-opened version wins) — a documented, deliberate choice, not a silent behavior change.
+- **`TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK` are unchanged** — still one full per-date computation per resolution step. Global graph algorithms have no simple event-sweep equivalent the way an additive metric like degree does; a real fix would need incremental-graph-algorithm work, deliberately out of scope for this pass (`benchmarks/`'s `track_betweenness` benchmark exists specifically to keep this cost visible, not to hide it).
+- **`CHANGEPOINTS`' own cost can now dominate at large point counts.** `changepoints()` is `track()` + binary segmentation (`coredb/signal.py`); once `track()`'s cost dropped, the segmentation's own documented `O(n^2)` cost (n = point count) became the larger term at D=365 (`benchmarks/run_all.py`: `changepoints.degree` ≈2.35s of that run's ≈2.38s total is segmentation, not `track()`). Not addressed here — a real fix (e.g. a faster segmentation algorithm) is future work, not something the interval-sweep rewrite could touch.
 
 ## Storage management
 

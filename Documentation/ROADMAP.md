@@ -71,6 +71,14 @@ Change-point detection, closing out "the full architecture" (complete the evolut
 
 **This closes the four-milestone "complete the evolution algebra" arc** (M5 traversal → M6 centrality → M7 provenance → M8 change-point detection), all as an embedded library per the locked-in scope. What's left is everything in "Explicitly deferred" below — real ideas, but outside that scope (a bigger grammar undertaking, a genuinely different deployment model, or infrastructure work like an optimizer/benchmark suite).
 
+## Milestone 9 — done
+
+`GraphTSBench` (`benchmarks/`) plus a real fix the benchmark's own numbers justified — not a new query surface, a performance/infrastructure pass prompted by an external technical review of the engine's cost profile.
+
+- **`benchmarks/`** — a pure-Python benchmark suite (`harness.py`/`datasets.py`/`bench_suite.py`/`run_all.py`, `python -m benchmarks.run_all [--quick]`) covering ingest, `AS_OF`/`HISTORY`/`DIFF`, `TRACK` (degree/weighted_degree/edge_weight/betweenness), `SERIES`, `PATH`, `CHANGEPOINTS`, `WHY_CHANGED`, and `dump`/`restore`. Exists specifically to gate future optimization work — the "Explicitly deferred" bullet below is now built, and the intent (measure before optimizing, keep a change only if the numbers improved) carries forward to any future work, including the native-code path suggested during the review that prompted this.
+- **Interval-sweep rewrite of `TRACK`/`SERIES`** — `degree`/`weighted_degree`/`edge_weight` and `SERIES` iteration previously reconstructed a snapshot via `as_of()`/`degree()` once per resolution step: O(D × H) for D resolution steps and H = a pattern's/entity's total history depth. Rewritten to fetch a pattern's/entity's full history once, build open/close events from each interval's `valid_from`/`valid_to`, and sweep a running total (`degree`/`weighted_degree`) or active-version set (`SERIES`) forward across the requested dates in one pass: O(H + D). Measured on `benchmarks/run_all.py`'s default sizes (H=150, D=365): `TRACK DEGREE` 6.09s → 28ms (≈214×), `TRACK EDGE_WEIGHT` 6.03s → 6.5ms (≈924×), `SERIES` iteration 6.33s → 9.6ms (≈659×). `TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK` are unchanged — deliberately out of scope, see `ARCHITECTURE.md`'s Performance section.
+- The equivalence between the old and new implementations is tested directly (`tests/test_track_series_sweep.py`): the old single-date methods (`db.degree()`, `db.edge_weight()`, `db.as_of()`) still exist and serve as the oracle.
+
 ## Explicitly deferred (not built yet)
 
 These come from a broader architectural vision shared during design discussion, but fall outside "complete the evolution algebra while staying an embedded library" — deferred for scoping reasons, not rejected:
@@ -87,7 +95,8 @@ These come from a broader architectural vision shared during design discussion, 
 - **`GraphSignal.join()` from TGQL** — joining a `TRACK` signal against external data needs caller-supplied data, so it stays Python-API-only, same reasoning as `ASSERT ... SOURCE`.
 - **`min_size`/`penalty` tuning for `CHANGEPOINTS` from TGQL** — sensitivity tuning is Python-API-only (`db.changepoints(..., min_size=..., penalty=...)`); TGQL always uses the auto-computed default.
 - **Change-point detection over `GraphSeries` directly** (structural regime shifts, not just a numeric metric's) — M8 only detects changepoints in a `GraphSignal` (a metric already reduced to numbers); detecting structural change in the graph itself, without picking a metric first, is a different and harder problem, not attempted.
-- **Benchmark suite** — a dedicated benchmark (`GraphTSBench`-style: `AS_OF`, bitemporal reconstruction, `HISTORY`, `DIFF`, `TRACK`, `PATH`, `WHY_CHANGED`, `CHANGEPOINTS`, cross-modal joins) to measure latency/storage/reconstruction cost as the engine matures.
+- **Native (C++) implementation of hot paths** — proposed during an external technical review (compact binary `RelationshipVersion` encoding, native `TemporalScanner`/`TemporalKernel` functions releasing the GIL, integer-interned entity/predicate ids, covering indexes, a batch write API). M9's benchmark suite is explicitly the gate for this: no native optimization should land without `benchmarks/` numbers proving it actually helps.
+- **Incremental/native `TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK`** — M9's interval sweep only applies to degree-family metrics and `SERIES`; global per-date graph algorithms have no simple event-sweep equivalent (see `ARCHITECTURE.md`'s Performance section) and would need real incremental-graph-algorithm work, not a straightforward refactor.
 
 ## Known limitations to revisit as scale increases
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from .errors import SchemaVersionError, ValidationError
 from .model import Assertion, Entity, RelationshipVersion, Source
@@ -39,6 +39,10 @@ def _utcnow_iso() -> str:
 
 def _parse_date(d: str) -> date:
     return datetime.strptime(d, "%Y-%m-%d").date()
+
+
+def _next_day(d: str) -> str:
+    return (_parse_date(d) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def _validate_identifier(name: str, value) -> None:
@@ -479,6 +483,42 @@ class Database:
         is precomputed here; snapshots/diffs are resolved on demand."""
         return GraphSeries(self, pattern, start, end, resolution_days)
 
+    def series_snapshots(self, pattern: tuple, start: str, end: str,
+                          resolution_days: int = 1) -> list[tuple[str, list[RelationshipVersion]]]:
+        """The same (date, matching_versions) pairs as calling
+        as_of(pattern, d) for every d in date_range(start, end,
+        resolution_days), computed in one O(H + D) sweep instead of D
+        separate O(H) as_of() scans - H being the total number of matching
+        intervals across the pattern's whole history. Unlike
+        _degree_track_points there's no relationship-level dedup ambiguity
+        to resolve: as_of() never deduped by relationship_id, so this is a
+        plain active-version-set sweep, keyed by version_id. Used by
+        GraphSeries.__iter__; GraphSeries.at() (a single date) still calls
+        as_of() directly since a lone query has no D to amortize."""
+        subject, predicate, obj = pattern
+        with self._store.txn() as t:
+            versions = list(self._scan_candidates(t, subject, predicate, obj))
+        events = []  # (date, is_open, version)
+        for v in versions:
+            events.append((v.valid_from, True, v))
+            if v.valid_to is not None:
+                events.append((_next_day(v.valid_to), False, v))
+        events.sort(key=lambda e: e[0])
+
+        active: dict[int, RelationshipVersion] = {}
+        points = []
+        ei, n_events = 0, len(events)
+        for d in date_range(start, end, resolution_days):
+            while ei < n_events and events[ei][0] <= d:
+                _, is_open, v = events[ei]
+                if is_open:
+                    active[v.version_id] = v
+                else:
+                    active.pop(v.version_id, None)
+                ei += 1
+            points.append((d, list(active.values())))
+        return points
+
     # ------------------------------------------------------------------
     # Graph metrics. degree/weighted_degree/edge_weight need only a single
     # neighbor lookup; closeness/betweenness/pagerank (below, in the
@@ -514,6 +554,102 @@ class Database:
         others.discard(entity_id)
         return others
 
+    def _all_versions_touching(self, t, entity_id: str) -> list[RelationshipVersion]:
+        """Every RelationshipVersion (every interval across the entity's
+        whole history, not date-filtered) where entity_id is subject or
+        object - the raw material for a degree/weighted_degree interval
+        sweep. Deduplicated by version_id (not relationship_id, unlike
+        _neighbor_versions) since every disjoint interval matters here, not
+        just whichever is active "now"; the dedup only matters for a
+        self-loop, which would otherwise appear in both the subject-side
+        and object-side scan."""
+        subject_side = list(self._scan_candidates(t, entity_id, None, None))
+        object_side = list(self._scan_candidates(t, None, None, entity_id))
+        by_version = {v.version_id: v for v in subject_side + object_side}
+        return list(by_version.values())
+
+    def _degree_track_points(self, entity_id: str, query_dates: list[str],
+                              weighted: bool) -> list[tuple[str, float]]:
+        """degree()/weighted_degree, swept across query_dates in one O(H + D)
+        pass instead of D separate O(H) degree() calls (H = entity_id's
+        total history depth, D = len(query_dates)). Fetches every version
+        touching entity_id once, groups by relationship_id (a relationship
+        contributes at most once, matching degree()'s own dedup), builds
+        +delta/-delta events at each interval's valid_from/day-after-valid_to,
+        and sweeps a running total forward.
+
+        Boundary case: a same-day retract_fact(valid_to=d) immediately
+        followed by assert_fact(valid_from=d) produces two versions of one
+        relationship whose valid-time intervals both cover d (valid_to is
+        inclusive) even though they were never simultaneously open in
+        system time. degree()'s per-date dedup resolves this via
+        list/iteration order (not a meaningful guarantee); this sweep
+        instead deterministically has the most-recently-opened version win
+        - a documented, deliberate choice, not an accidental divergence.
+        """
+        with self._store.txn() as t:
+            versions = self._all_versions_touching(t, entity_id)
+        by_rel: dict[int, list[RelationshipVersion]] = {}
+        for v in versions:
+            by_rel.setdefault(v.relationship_id, []).append(v)
+
+        events = []  # (date, is_open, relationship_id, version_id, delta)
+        for rel_id, vs in by_rel.items():
+            for v in vs:
+                delta = (v.confidence or 0.0) if weighted else 1.0
+                events.append((v.valid_from, True, rel_id, v.version_id, delta))
+                if v.valid_to is not None:
+                    events.append((_next_day(v.valid_to), False, rel_id, v.version_id, delta))
+        events.sort(key=lambda e: e[0])
+
+        open_versions: dict[int, set] = {}
+        contribution: dict[int, float] = {}
+        running = 0.0
+        points = []
+        ei, n_events = 0, len(events)
+        for d in query_dates:
+            while ei < n_events and events[ei][0] <= d:
+                _, is_open, rel_id, vid, delta = events[ei]
+                open_set = open_versions.setdefault(rel_id, set())
+                if is_open:
+                    open_set.add(vid)
+                    running -= contribution.get(rel_id, 0.0)
+                    contribution[rel_id] = delta
+                    running += delta
+                else:
+                    open_set.discard(vid)
+                    if not open_set:
+                        running -= contribution.get(rel_id, 0.0)
+                        contribution[rel_id] = 0.0
+                ei += 1
+            points.append((d, running))
+        return points
+
+    def _edge_weight_track_points(self, subject: str, predicate: str, object_id: str,
+                                   query_dates: list[str]) -> list[tuple[str, float | None]]:
+        """edge_weight(), swept across query_dates in one O(H + D) pass
+        instead of D separate O(H) edge_weight() calls. Fetches the
+        triple's full version history once (already valid_from-sorted via
+        history()) and steps a "currently active interval" pointer forward,
+        reporting its confidence (or None where no interval covers a date)
+        - a step function, not an additive counter, since edge_weight has
+        at most one relationship to track. Same same-day-boundary caveat as
+        _degree_track_points: the most-recently-opened covering interval
+        wins."""
+        versions = self.history((subject, predicate, object_id))
+        points = []
+        vi, n_versions = 0, len(versions)
+        current = None
+        for d in query_dates:
+            while vi < n_versions and versions[vi].valid_from <= d:
+                current = versions[vi]
+                vi += 1
+            if current is not None and (current.valid_to is None or current.valid_to >= d):
+                points.append((d, current.confidence))
+            else:
+                points.append((d, None))
+        return points
+
     def degree(self, entity_id: str, on_date: str, weighted: bool = False) -> float:
         """How many relationships touch `entity_id` (as subject or object)
         on `on_date`. `weighted=True` sums confidence (None treated as 0.0)
@@ -539,26 +675,34 @@ class Database:
         (not lazy like GraphSeries) since a signal is a small point list
         meant to be joined/plotted immediately. `max_depth` only applies to
         the BFS-bounded metrics (closeness/betweenness); harmless to pass
-        for the others."""
+        for the others.
+
+        degree/weighted_degree/edge_weight are computed via a single O(H + D)
+        interval sweep (see _degree_track_points/_edge_weight_track_points)
+        rather than D separate O(H) per-date reconstructions.
+        closeness/betweenness/pagerank remain one call per date - they're
+        global per-date graph computations with no simple event-sweep
+        equivalent (see Documentation/ARCHITECTURE.md's Performance
+        section); benchmarks/ tracks this cost so it stays visible."""
+        query_dates = list(date_range(start, end, resolution_days))
         if metric == "degree":
-            fn = lambda d: self.degree(target, d)
+            points = self._degree_track_points(target, query_dates, weighted=False)
         elif metric == "weighted_degree":
-            fn = lambda d: self.degree(target, d, weighted=True)
+            points = self._degree_track_points(target, query_dates, weighted=True)
         elif metric == "edge_weight":
             subject, predicate, object_id = target
-            fn = lambda d: self.edge_weight(subject, predicate, object_id, d)
+            points = self._edge_weight_track_points(subject, predicate, object_id, query_dates)
         elif metric == "closeness":
-            fn = lambda d: self.closeness(target, d, max_depth=max_depth)
+            points = [(d, self.closeness(target, d, max_depth=max_depth)) for d in query_dates]
         elif metric == "betweenness":
-            fn = lambda d: self.betweenness(target, d, max_depth=max_depth)
+            points = [(d, self.betweenness(target, d, max_depth=max_depth)) for d in query_dates]
         elif metric == "pagerank":
-            fn = lambda d: self.pagerank(target, d)
+            points = [(d, self.pagerank(target, d)) for d in query_dates]
         else:
             raise ValidationError(
                 f"unknown metric {metric!r} - expected one of 'degree', 'weighted_degree', "
                 "'edge_weight', 'closeness', 'betweenness', 'pagerank'"
             )
-        points = [(d, fn(d)) for d in date_range(start, end, resolution_days)]
         return GraphSignal(metric=metric, target=target, points=points)
 
     def changepoints(self, metric: str, target, start: str, end: str, resolution_days: int = 1,

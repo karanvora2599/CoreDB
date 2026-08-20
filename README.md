@@ -16,7 +16,8 @@ This project generalizes a pattern first proven in [`Knowledge_Graph`](../Knowle
 - **Milestone 6** (done): TGQL v0.5 (`TRACK CLOSENESS`/`BETWEENNESS`/`PAGERANK`), centrality metrics built on M5's traversal — closeness is harmonic (handles a disconnected/depth-bounded graph honestly), betweenness/PageRank are exposed both per-entity and as whole-graph `_all` variants since they're inherently global computations.
 - **Milestone 7** (done): TGQL v0.6 (`WHY_CHANGED`), tracing what changed about a relationship and which `Assertion`/`Source` evidence is responsible — the provenance chain the data model has captured since M2, finally with a query surface.
 - **Milestone 8** (done): TGQL v0.7 (`CHANGEPOINTS`), binary-segmentation change-point detection over any `TRACK`-able metric — this closes out "the full architecture" (M5 traversal → M6 centrality → M7 provenance → M8 change-point detection), all as an embedded library, per the scope locked in at the start of that arc.
-- See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deliberately deferred beyond that scope (general multi-hop pattern matching, streaming, a server mode, a query optimizer, a benchmark suite).
+- **Milestone 9** (done): [`benchmarks/`](benchmarks/) (`GraphTSBench`) — a pure-Python benchmark suite that gates optimization work — plus an interval-sweep rewrite of `TRACK DEGREE`/`WEIGHTED_DEGREE`/`EDGE_WEIGHT` and `SERIES`, from O(D×H) per-date reconstruction to a one-pass O(H+D) sweep (measured ~200–900× faster at benchmark default sizes; see [`Documentation/ARCHITECTURE.md`](Documentation/ARCHITECTURE.md)'s Performance section).
+- See [`Documentation/ROADMAP.md`](Documentation/ROADMAP.md) for what's deliberately deferred beyond that scope (general multi-hop pattern matching, streaming, a server mode, a query optimizer, native/C++ hot paths).
 
 ## Install
 
@@ -100,3 +101,12 @@ Or use the Python API directly (`db.as_of(...)`, `db.history(...)`, `db.diff_del
 ```bash
 ./.venv/Scripts/python -m pytest -v
 ```
+
+## Benchmarks
+
+```bash
+./.venv/Scripts/python -m benchmarks.run_all            # full sizes
+./.venv/Scripts/python -m benchmarks.run_all --quick     # small sizes, fast dev-loop run
+```
+
+See [`benchmarks/README.md`](benchmarks/README.md) — this exists to gate future optimization work, not as a marketing number.
