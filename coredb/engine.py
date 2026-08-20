@@ -26,11 +26,12 @@ from .series import GraphDelta, GraphSeries, date_range
 from .signal import GraphSignal
 from .storage import keys as K
 from .storage.kvstore import KVStore
+from .storage.version_codec import decode_version, encode_version
 
 _VERSIONS_LOW = b"\x00" * 8
 _VERSIONS_HIGH = b"\xff" * 8 + b"\x00"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # bumped for M10 Part 4: versions table moved from JSON to a compact binary encoding
 _SCHEMA_VERSION_KEY = b"__schema_version__"
 
 
@@ -121,10 +122,10 @@ class Database:
 
     def _load_version(self, t, vid: int) -> RelationshipVersion:
         raw = t.get("versions", K.encode_id(vid))
-        return RelationshipVersion.from_dict(json.loads(raw))
+        return decode_version(raw)
 
     def _store_version(self, t, version: RelationshipVersion) -> None:
-        t.put("versions", K.encode_id(version.version_id), json.dumps(version.to_dict()).encode())
+        t.put("versions", K.encode_id(version.version_id), encode_version(version))
 
     def _touch_entity(self, t, entity_id: str, seen_date: str) -> None:
         key = entity_id.encode("utf-8")
@@ -234,7 +235,7 @@ class Database:
                 yield self._load_version(t, K.decode_id(val))
         else:
             for _, val in t.range_iter("versions", _VERSIONS_LOW, _VERSIONS_HIGH):
-                version = RelationshipVersion.from_dict(json.loads(val))
+                version = decode_version(val)
                 if predicate is not None and version.predicate != predicate:
                     continue
                 yield version
@@ -467,7 +468,7 @@ class Database:
                 opened = self._scan_time_index(t, "opened_time_idx", date_from, date_to, exclusive_start=True)
                 closed = self._scan_time_index(t, "closed_time_idx", date_from, date_to, exclusive_end=True)
                 # No interval index yet for "spans both dates" - full scan.
-                all_versions = [RelationshipVersion.from_dict(json.loads(v))
+                all_versions = [decode_version(v)
                                 for _, v in t.range_iter("versions", _VERSIONS_LOW, _VERSIONS_HIGH)]
                 persisted = [v for v in all_versions
                              if v.valid_from <= date_from and (v.valid_to is None or v.valid_to >= date_to)]
@@ -866,7 +867,7 @@ class Database:
         global branch already has, not a new one."""
         ids = set()
         for _, val in t.range_iter("versions", _VERSIONS_LOW, _VERSIONS_HIGH):
-            v = RelationshipVersion.from_dict(json.loads(val))
+            v = decode_version(val)
             if v.valid_from <= on_date and (v.valid_to is None or v.valid_to >= on_date):
                 ids.add(v.subject_id)
                 ids.add(v.object_id)
@@ -1095,7 +1096,7 @@ class Database:
         copy would preserve but a schema change would invalidate. Pair with
         coredb.restore() to migrate across a schema change."""
         with self._store.txn() as t:
-            versions = [RelationshipVersion.from_dict(json.loads(v))
+            versions = [decode_version(v)
                         for _, v in t.range_iter("versions", _VERSIONS_LOW, _VERSIONS_HIGH)]
         versions.sort(key=lambda v: v.valid_from)
         with open(path, "w", encoding="utf-8") as f:

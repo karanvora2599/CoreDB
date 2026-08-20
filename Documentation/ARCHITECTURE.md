@@ -14,7 +14,8 @@ coredb/
 ├── storage/
 │   ├── kvstore.py           # KVStore/Transaction interface - engine.py never talks to LMDB directly
 │   ├── lmdb_backend.py       # LMDB implementation of KVStore
-│   └── keys.py               # composite key encoding for LMDB's sorted byte-string keys
+│   ├── keys.py               # composite key encoding for LMDB's sorted byte-string keys
+│   └── version_codec.py      # compact binary encoding for RelationshipVersion ("VersionCore", M10 Part 4)
 └── query/
     ├── grammar.lark          # Lark grammar for TGQL (coredb/query language)
     ├── ast_nodes.py           # MatchQuery, HistoryQuery, DiffQuery, RangeQuery, SeriesQuery, AssertStatement, RetractStatement, TrackQuery/ChangepointsQuery (degree/closeness/betweenness/pagerank/...), PathQuery, FirstConnectedQuery, PathHistoryQuery, WhyChangedQuery
@@ -118,9 +119,17 @@ This is the project's first native code, deliberately sequenced pure-computation
 
 Measured: raw `assert_fact` ingest, 2000 facts, one call per transaction vs. all inside one `write_batch()`: 1.94s → 113ms (≈17×). `coredb.restore()` end to end (same 2000-fact dump): ~975ms → 85ms (≈11×, includes the JSON parsing and `dump()`/`assert_fact` overhead the raw ingest benchmark doesn't).
 
+### `VersionCore`: a compact binary encoding for the `versions` table (M10 Part 4)
+
+`coredb/storage/version_codec.py` replaces JSON with a packed binary struct for `RelationshipVersion` — the highest-volume table and the one every scan/BFS reads through `_load_version`. A fixed-width, little-endian header (ids as int64, dates as int32 proleptic-Gregorian day ordinals via `date.toordinal()`, system timestamps as int64 *microseconds since the Unix epoch computed via exact `timedelta` integer arithmetic* — not `dt.timestamp() * 1e6`, which loses precision at microsecond resolution for present-day timestamps since it round-trips through a float64 near its 2^53 exact-integer limit — and confidence as float64 with `NaN` as the "unset" sentinel, distinguishable from a real `0.0`) followed by a variable-length section for the caller-supplied strings, the `properties` dict (still JSON — arbitrary nested structure, not worth a hand-rolled schema), and the `assertion_ids` list. Other tables (`relationships`/`assertions`/`entities`/`sources`) stay JSON — lower volume, not measured as a cost worth this treatment.
+
+**Schema-versioned, not a live migration.** `SCHEMA_VERSION` bumped 1→2; an existing database written by pre-M10 code fails loudly with `SchemaVersionError` on open (the exact mechanism "Storage management" describes below) rather than being silently misread as the new binary layout — `Database.dump()` (old code) + `coredb.restore()` (new code) is the migration path, same as any other schema change.
+
+Measured (isolated encode+decode round-trip, 5000 records): JSON 60.5ms → binary 42.2ms, ≈1.4×. Deliberately not a dramatic number, and reported honestly as such: unlike Parts 1-2, this doesn't cross into native code — `struct.pack`/`unpack` and CPython's `json` module are both C-implemented, so the only savings are from not formatting dates/numbers as text and skipping dict overhead. `write_batch()` (Part 3) had far more impact on real ingest/restore throughput than this did in isolation, since transaction-commit count dominated over per-record encoding cost.
+
 ## Storage management
 
-- **Schema versioning.** `Database` writes a `schema_version` marker into the `counters` table on first open. If an existing database's marker doesn't match the running code's expected version, `Database()` raises `SchemaVersionError` immediately rather than silently operating on a mismatched on-disk shape. Recovery path: `Database.dump()` with the old code version, `coredb.restore()` with the new one.
+- **Schema versioning.** `Database` writes a `schema_version` marker into the `counters` table on first open. If an existing database's marker doesn't match the running code's expected version, `Database()` raises `SchemaVersionError` immediately rather than silently operating on a mismatched on-disk shape. Recovery path: `Database.dump()` with the old code version, `coredb.restore()` with the new one. This is what caught M10 Part 4's `versions` table encoding change (JSON → binary) — `SCHEMA_VERSION` bumped 1→2, so a pre-M10 database fails loudly on open rather than being misread as the new binary layout.
 - **`Database.stats()`** — cheap entry counts per table via LMDB's native `stat()` (no manual iteration).
 - **`Database.backup(path)`** — a compacted, self-contained copy via `env.copy(path, compact=True)`, safe to call on a live database. `path` is a directory: LMDB uses subdir mode by default, so a CoreDB database is a directory containing `data.mdb`/`lock.mdb`, not a single file.
 - **`Database.dump(path)` / `coredb.restore(dump_path, db_path)`** — schema-independent JSON-lines export/import of the logical facts (not internal ids or system-time), replayed through `assert_fact`/`retract_fact`. This is the actual migration path across a schema change — a `backup()`'s raw LMDB bytes are still in the old schema and won't help after one.

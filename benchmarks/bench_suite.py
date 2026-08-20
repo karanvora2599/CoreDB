@@ -207,6 +207,53 @@ def bench_segmentation_native(quick: bool):
                   lambda: signal_mod.detect_changepoints(points, use_native=True))
 
 
+def bench_version_encode_json(quick: bool):
+    """Isolates the versions-table serialization cost before M10 Part 4
+    (VersionCore) - json.dumps/loads on RelationshipVersion.to_dict(), the
+    format every read/write used before the binary codec. See
+    bench_version_encode_binary for the same records through
+    coredb.storage.version_codec."""
+    import json
+
+    from coredb.model import RelationshipVersion
+
+    n = 500 if quick else 5000
+    versions = [
+        RelationshipVersion(version_id=i, relationship_id=i, subject_id=f"S{i}", predicate="LINK",
+                             object_id=f"O{i}", valid_from="2020-01-01", valid_to=None,
+                             system_from="2020-01-01T00:00:00.000001+00:00", system_to=None,
+                             last_confirmed="2020-01-01", confidence=0.5, properties={}, assertion_ids=[])
+        for i in range(n)
+    ]
+
+    def run():
+        for v in versions:
+            raw = json.dumps(v.to_dict()).encode()
+            RelationshipVersion.from_dict(json.loads(raw))
+
+    return bench("storage.version_encode.json", n, run)
+
+
+def bench_version_encode_binary(quick: bool):
+    from coredb.model import RelationshipVersion
+    from coredb.storage.version_codec import decode_version, encode_version
+
+    n = 500 if quick else 5000
+    versions = [
+        RelationshipVersion(version_id=i, relationship_id=i, subject_id=f"S{i}", predicate="LINK",
+                             object_id=f"O{i}", valid_from="2020-01-01", valid_to=None,
+                             system_from="2020-01-01T00:00:00.000001+00:00", system_to=None,
+                             last_confirmed="2020-01-01", confidence=0.5, properties={}, assertion_ids=[])
+        for i in range(n)
+    ]
+
+    def run():
+        for v in versions:
+            decode_version(encode_version(v))
+
+    return bench("storage.version_encode.binary", n, run)
+
+
 def bench_why_changed(quick: bool):
     n_cycles = 20 if quick else 100
     with temp_db() as db:
@@ -254,6 +301,8 @@ BENCHMARKS = [
     bench_changepoints,
     bench_segmentation_python,
     bench_segmentation_native,
+    bench_version_encode_json,
+    bench_version_encode_binary,
     bench_why_changed,
     bench_dump_restore,
 ]
