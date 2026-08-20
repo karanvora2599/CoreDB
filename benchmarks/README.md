@@ -19,6 +19,14 @@ These four are the ones the interval-sweep rewrite (`coredb/engine.py`'s `_degre
 
 `track_betweenness` is included deliberately as a **negative** case — betweenness/closeness/PageRank are global per-date graph computations with no simple event-sweep, so `TRACK BETWEENNESS`/`TRACK PAGERANK` still cost `O(D × full-graph-computation)`. See `Documentation/ARCHITECTURE.md`'s Performance section.
 
+## `bench_at_scale.py` — the deep, opt-in benchmark
+
+```bash
+./.venv/Scripts/python -m benchmarks.bench_at_scale
+```
+
+Not part of `run_all.py`'s default suite (too slow for a normal dev-loop run). Tests one specific question at a larger, more realistic scale (50,000 facts, long entity names, a small reused predicate vocabulary): does string-key size/comparison cost in `spo_idx`/`ops_idx`/`relationship_lookup` matter enough to justify integer-interned entity/predicate ids? As of M10 Part 5, the answer was no — see `Documentation/ARCHITECTURE.md`'s Performance section. Re-run this if that assumption needs revisiting (much larger graphs, a working set that exceeds RAM).
+
 ## Adding a benchmark
 
 Add a `bench_*(quick: bool) -> BenchResult` function to `bench_suite.py` (using `harness.temp_db()`/`harness.bench()`) and append it to `BENCHMARKS`.
