@@ -14,7 +14,7 @@ from setuptools import setup
 ext_modules = [
     Pybind11Extension(
         "coredb._native",
-        ["native/segmentation.cpp"],
+        ["native/module.cpp", "native/segmentation.cpp", "native/centrality.cpp"],
         cxx_std=17,
     ),
 ]

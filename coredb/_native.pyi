@@ -1,5 +1,7 @@
-"""Type stub for the optional compiled extension (native/segmentation.cpp).
-Not present unless a C++ toolchain built it - see coredb/signal.py's
-try/except ImportError."""
+"""Type stub for the optional compiled extension (native/*.cpp).
+Not present unless a C++ toolchain built it - see coredb/signal.py's and
+coredb/graph_algorithms.py's try/except ImportError."""
 
 def detect_changepoints_indices(values: list[float], min_size: int, penalty: float) -> list[int]: ...
+def brandes_betweenness(adjacency: list[list[int]], max_depth: int) -> list[float]: ...
+def pagerank(out_edges: list[list[int]], damping: float, max_iterations: int, tol: float) -> list[float]: ...

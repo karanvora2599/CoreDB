@@ -16,10 +16,10 @@ DSL executor's job, not the engine's.
 from __future__ import annotations
 
 import json
-from collections import deque
 from datetime import date, datetime, timedelta, timezone
 
 from .errors import SchemaVersionError, ValidationError
+from .graph_algorithms import betweenness_from_adjacency, pagerank_from_adjacency
 from .model import Assertion, Entity, RelationshipVersion, Source
 from .series import GraphDelta, GraphSeries, date_range
 from .signal import GraphSignal
@@ -868,42 +868,24 @@ class Database:
         whole graph in one pass regardless of which entity you actually
         care about - call this directly rather than betweenness() in a loop
         if you need more than one entity's score, since betweenness() would
-        recompute the whole graph on every call."""
+        recompute the whole graph on every call.
+
+        The LMDB reads (active entities, each node's neighbors) happen
+        here, once, building a plain local-integer-indexed adjacency list;
+        the actual Brandes computation is delegated to
+        graph_algorithms.betweenness_from_adjacency(), which runs it in
+        coredb._native when available (see Documentation/ARCHITECTURE.md's
+        Performance section) or an equivalent pure-Python fallback."""
         _validate_date("on_date", on_date)
         _validate_max_depth(max_depth)
         with self._store.txn() as t:
-            nodes = self._active_entity_ids(t, on_date)
-            betweenness = {v: 0.0 for v in nodes}
-            for s in nodes:
-                stack = []
-                predecessors = {v: [] for v in nodes}
-                sigma = {v: 0 for v in nodes}
-                sigma[s] = 1
-                dist = {v: -1 for v in nodes}
-                dist[s] = 0
-                queue = deque([s])
-                while queue:
-                    v = queue.popleft()
-                    stack.append(v)
-                    if dist[v] >= max_depth:
-                        continue
-                    for w in self._neighbor_node_ids(t, v, on_date):
-                        if dist[w] < 0:
-                            dist[w] = dist[v] + 1
-                            queue.append(w)
-                        if dist[w] == dist[v] + 1:
-                            sigma[w] += sigma[v]
-                            predecessors[w].append(v)
-                delta = {v: 0.0 for v in nodes}
-                while stack:
-                    w = stack.pop()
-                    for v in predecessors[w]:
-                        delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w])
-                    if w != s:
-                        betweenness[w] += delta[w]
+            nodes = list(self._active_entity_ids(t, on_date))
+            index = {node: i for i, node in enumerate(nodes)}
+            adjacency = [[index[w] for w in self._neighbor_node_ids(t, v, on_date)] for v in nodes]
+        raw_scores = betweenness_from_adjacency(adjacency, max_depth)
         # Each unordered pair's shortest path is counted from both ends -
         # halve to correct the undirected double-count.
-        return {k: v / 2.0 for k, v in betweenness.items()}
+        return {nodes[i]: raw_scores[i] / 2.0 for i in range(len(nodes))}
 
     def betweenness(self, entity_id: str, on_date: str, max_depth: int = 4) -> float:
         """One entity's betweenness centrality. See betweenness_all()'s
@@ -930,32 +912,21 @@ class Database:
         nodes (no out-edges) redistribute their rank uniformly, standard
         PageRank handling. A global computation like betweenness_all - call
         this directly rather than pagerank() in a loop if you need more
-        than one entity's score."""
+        than one entity's score.
+
+        Same split as betweenness_all(): the LMDB reads happen here, once,
+        building a plain local-integer-indexed out-edge list; the power
+        iteration itself is delegated to
+        graph_algorithms.pagerank_from_adjacency() (native when available)."""
         _validate_date("on_date", on_date)
         with self._store.txn() as t:
             nodes = list(self._active_entity_ids(t, on_date))
-            out_edges = {v: self._out_neighbors(t, v, on_date) for v in nodes}
-        n = len(nodes)
-        if n == 0:
+            index = {node: i for i, node in enumerate(nodes)}
+            out_edges = [[index[u] for u in self._out_neighbors(t, v, on_date)] for v in nodes]
+        if not nodes:
             return {}
-        rank = {v: 1.0 / n for v in nodes}
-        for _ in range(max_iterations):
-            new_rank = {v: (1.0 - damping) / n for v in nodes}
-            for v in nodes:
-                out = out_edges[v]
-                if not out:
-                    share = damping * rank[v] / n
-                    for u in nodes:
-                        new_rank[u] += share
-                else:
-                    share = damping * rank[v] / len(out)
-                    for u in out:
-                        new_rank[u] += share
-            diff = sum(abs(new_rank[v] - rank[v]) for v in nodes)
-            rank = new_rank
-            if diff < tol:
-                break
-        return rank
+        raw_scores = pagerank_from_adjacency(out_edges, damping, max_iterations, tol)
+        return {nodes[i]: raw_scores[i] for i in range(len(nodes))}
 
     def pagerank(self, entity_id: str, on_date: str, damping: float = 0.85,
                  max_iterations: int = 100) -> float:

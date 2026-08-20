@@ -8,6 +8,7 @@ which are what the interval-sweep rewrite targets.
 """
 from __future__ import annotations
 
+import coredb.graph_algorithms as ga_mod
 import coredb.signal as signal_mod
 
 from .datasets import seed_churn_history, seed_entity_churn, seed_random_graph
@@ -89,6 +90,51 @@ def bench_track_betweenness(quick: bool):
                       lambda: db.track("betweenness", "Node0", "2020-01-01",
                                         f"2020-{1 + n_steps // 28:02d}-01", resolution_days=7, max_depth=3),
                       note=f"{n_entities} nodes, D~{n_steps} steps")
+
+
+def _synthetic_adjacency(n: int, avg_degree: int, seed: int = 7):
+    import random
+
+    rng = random.Random(seed)
+    adjacency = [[] for _ in range(n)]
+    for i in range(n):
+        targets = rng.sample(range(n), min(avg_degree, n - 1))
+        adjacency[i] = [t for t in targets if t != i]
+    return adjacency
+
+
+def bench_betweenness_python(quick: bool):
+    """Isolates JUST the Brandes computation (not the LMDB adjacency
+    build) - the M10 Part 2 native target. See bench_betweenness_native."""
+    n = 40 if quick else 150
+    adjacency = _synthetic_adjacency(n, avg_degree=6)
+    return bench("centrality.betweenness.python", n,
+                  lambda: ga_mod.betweenness_from_adjacency(adjacency, max_depth=4, use_native=False))
+
+
+def bench_betweenness_native(quick: bool):
+    n = 40 if quick else 150
+    adjacency = _synthetic_adjacency(n, avg_degree=6)
+    if ga_mod._native is None:
+        return bench("centrality.betweenness.native (not built)", n, lambda: None)
+    return bench("centrality.betweenness.native", n,
+                  lambda: ga_mod.betweenness_from_adjacency(adjacency, max_depth=4, use_native=True))
+
+
+def bench_pagerank_python(quick: bool):
+    n = 40 if quick else 150
+    adjacency = _synthetic_adjacency(n, avg_degree=6)
+    return bench("centrality.pagerank.python", n,
+                  lambda: ga_mod.pagerank_from_adjacency(adjacency, 0.85, 100, 1e-6, use_native=False))
+
+
+def bench_pagerank_native(quick: bool):
+    n = 40 if quick else 150
+    adjacency = _synthetic_adjacency(n, avg_degree=6)
+    if ga_mod._native is None:
+        return bench("centrality.pagerank.native (not built)", n, lambda: None)
+    return bench("centrality.pagerank.native", n,
+                  lambda: ga_mod.pagerank_from_adjacency(adjacency, 0.85, 100, 1e-6, use_native=True))
 
 
 def bench_series_snapshot(quick: bool):
@@ -185,6 +231,10 @@ BENCHMARKS = [
     bench_track_weighted_degree,
     bench_track_edge_weight,
     bench_track_betweenness,
+    bench_betweenness_python,
+    bench_betweenness_native,
+    bench_pagerank_python,
+    bench_pagerank_native,
     bench_series_snapshot,
     bench_path_exists,
     bench_changepoints,

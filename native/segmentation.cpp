@@ -6,15 +6,11 @@
 // attributable to one variable (native vs Python), not a mix of that and
 // an algorithm change. Date handling, None-dropping, and penalty
 // auto-computation all stay in coredb/signal.py; this only takes/returns
-// plain numeric index-space data.
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+// plain numeric index-space data. pybind11 bindings live in module.cpp.
+#include "segmentation.h"
 
 #include <algorithm>
 #include <utility>
-#include <vector>
-
-namespace py = pybind11;
 
 namespace {
 
@@ -84,12 +80,4 @@ std::vector<int> detect_changepoints_indices(const std::vector<double>& values, 
     }
     std::sort(changepoints.begin(), changepoints.end());
     return changepoints;
-}
-
-PYBIND11_MODULE(_native, m) {
-    m.doc() = "CoreDB optional native acceleration (see Documentation/ARCHITECTURE.md's Performance section)";
-    m.def("detect_changepoints_indices", &detect_changepoints_indices,
-          py::call_guard<py::gil_scoped_release>(),
-          py::arg("values"), py::arg("min_size"), py::arg("penalty"),
-          "Binary segmentation over index-space values; returns sorted split indices.");
 }
